@@ -72,8 +72,3 @@ Das Script speichert lokale Einstellungen (via GM Storage, Fallback `localStorag
 - **Button erscheint nicht im Header**
   - Seite vollstaendig laden lassen
   - Eventuell Browser-Cache leeren und neu laden
-
-## Datei
-
-- Script: `mportal-name-highlighter.user.js`
-- Doku: `README.md`
