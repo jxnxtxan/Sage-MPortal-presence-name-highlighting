@@ -230,8 +230,8 @@
     const style = document.createElement("style");
     style.id = STYLE_ID;
     style.textContent = `
-      #${TOGGLE_ID} { margin-left: 8px; }
-      #${TOGGLE_ID} button { border: 1px solid #c5c5c5; border-radius: 4px; background: #fff; color: #222; font-size: 12px; padding: 5px 9px; cursor: pointer; }
+      #${TOGGLE_ID} { margin-left: 4px; margin-right: 4px; display: flex; align-items: center; }
+      #${TOGGLE_ID} button { border: 1px solid #c5c5c5; border-radius: 4px; background: #fff; color: #222; font-size: 12px; line-height: 1.2; min-height: 28px; padding: 5px 9px; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
       #${PANEL_ID} { position: fixed; top: 70px; right: 20px; width: 340px; background: #fff; border: 1px solid #bfc6d4; border-radius: 8px; box-shadow: 0 8px 26px rgba(0,0,0,.18); z-index: 2147483647; display: none; font-family: Arial, sans-serif; }
       #${PANEL_ID}.open { display: block; }
       #${PANEL_ID} .tm-head { padding: 10px 12px 6px; font-weight: 600; font-size: 13px; }
