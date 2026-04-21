@@ -26,10 +26,13 @@
   const TILE_SELECTOR = ".sagehr-tile";
   const HEADER_SELECTOR = ".sagehr-dataheader";
   const NAME_CONTAINER_SELECTOR = ".sagehr-tile-small-info > .text-overflow-ellipsis";
+  const FAVORITES_SECTION_CLASS = "tm-favorites-tiles-section";
+  const FAVORITES_SECTION_CARDS_CLASS = "tm-favorites-tiles-cards";
 
   const KEYS = {
     discovered: `${STORAGE_PREFIX}:discoveredNames`,
     selected: `${STORAGE_PREFIX}:selectedNames`,
+    favorites: `${STORAGE_PREFIX}:favoriteNames`,
     colors: `${STORAGE_PREFIX}:perNameColors`,
     defaultColor: `${STORAGE_PREFIX}:defaultColor`,
     mode: `${STORAGE_PREFIX}:collectionMode`,
@@ -40,6 +43,7 @@
   const state = {
     discoveredNames: {},
     selectedNames: [],
+    favoriteNames: [],
     perNameColors: {},
     defaultColor: DEFAULT_HIGHLIGHT_COLOR,
     collectionMode: DEFAULT_COLLECTION_MODE,
@@ -143,6 +147,7 @@
     migrateLegacyDataIfNeeded();
     state.discoveredNames = getStoredValue(KEYS.discovered, {});
     state.selectedNames = getStoredValue(KEYS.selected, []);
+    state.favoriteNames = getStoredValue(KEYS.favorites, []);
     state.perNameColors = getStoredValue(KEYS.colors, {});
     state.defaultColor = getStoredValue(KEYS.defaultColor, DEFAULT_HIGHLIGHT_COLOR);
     state.collectionMode = getStoredValue(KEYS.mode, DEFAULT_COLLECTION_MODE);
@@ -152,6 +157,7 @@
   function persistState() {
     setStoredValue(KEYS.discovered, state.discoveredNames);
     setStoredValue(KEYS.selected, state.selectedNames);
+    setStoredValue(KEYS.favorites, state.favoriteNames);
     setStoredValue(KEYS.colors, state.perNameColors);
     setStoredValue(KEYS.defaultColor, state.defaultColor);
     setStoredValue(KEYS.mode, state.collectionMode);
@@ -174,7 +180,9 @@
   }
 
   function getTilesByMode() {
-    const allTiles = Array.from(document.querySelectorAll(TILE_SELECTOR));
+    const allTiles = Array.from(document.querySelectorAll(TILE_SELECTOR)).filter(
+      (tile) => !tile.classList.contains("tm-favorite-clone")
+    );
     if (state.collectionMode === "visible_only") {
       return allTiles.filter(isElementVisible);
     }
@@ -212,6 +220,7 @@
     });
     state.discoveredNames = next;
     state.selectedNames = state.selectedNames.filter((key) => Boolean(next[key]));
+    state.favoriteNames = state.favoriteNames.filter((key) => Boolean(next[key]) && state.selectedNames.includes(key));
     Object.keys(state.perNameColors).forEach((key) => {
       if (!next[key]) {
         delete state.perNameColors[key];
@@ -253,6 +262,14 @@
       #${PANEL_ID} .tm-actions { margin-top: 10px; display: flex; gap: 6px; flex-wrap: wrap; }
       #${PANEL_ID} .tm-actions button { border: 1px solid #c5c5c5; border-radius: 4px; background: #f8f8f8; font-size: 12px; padding: 5px 8px; cursor: pointer; }
       #${PANEL_ID} .tm-status { margin-top: 8px; color: #4f5b70; font-size: 11px; }
+      #${PANEL_ID} .tm-name-main { display: flex; align-items: center; gap: 6px; min-width: 0; }
+      #${PANEL_ID} .tm-favorite-toggle { border: 1px solid #c5c5c5; background: #fff; border-radius: 4px; color: #607089; width: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; font-size: 14px; line-height: 1; }
+      #${PANEL_ID} .tm-favorite-toggle.is-favorite { color: #c58600; border-color: #d4b45a; background: #fff8e6; }
+      #${PANEL_ID} .tm-selected-item > span { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .${FAVORITES_SECTION_CLASS} { margin: 10px auto; width: calc(100% - 20px); box-sizing: border-box; padding: 8px; border: 1px solid #d9e2f1; border-radius: 8px; background: #f8fbff; }
+      .${FAVORITES_SECTION_CLASS} .tm-favorites-tiles-title { font-size: 12px; font-weight: 600; color: #3f4f68; margin-bottom: 8px; }
+      .${FAVORITES_SECTION_CARDS_CLASS} { display: flex; flex-wrap: wrap; gap: 8px; }
+      .${FAVORITES_SECTION_CARDS_CLASS} .tm-favorite-clone { flex: 0 1 220px; max-width: 260px; }
       html.tm-presence-accent-all ${TILE_SELECTOR} > div[data-bind*="presenceState"],
       html.tm-presence-accent-selected ${TILE_SELECTOR}.tm-name-match > div[data-bind*="presenceState"] { width: 10px !important; border-right: 1px solid rgba(255,255,255,0.65); box-shadow: inset -1px 0 0 rgba(0,0,0,0.2), inset 0 0 0 1px rgba(255,255,255,0.2); filter: saturate(1.3) contrast(1.12) brightness(1.05); border-radius: 0; transition: box-shadow .15s ease, filter .15s ease; }
       html.tm-presence-accent-all ${TILE_SELECTOR}:hover > div[data-bind*="presenceState"],
@@ -276,8 +293,13 @@
 
   function applyHighlighting() {
     const selected = getSelectedSet();
+    const favorites = new Set(state.favoriteNames);
     let hits = 0;
-    Array.from(document.querySelectorAll(TILE_SELECTOR)).forEach((tile) => {
+    const favoriteTilesByHost = new Map();
+
+    Array.from(document.querySelectorAll(TILE_SELECTOR))
+      .filter((tile) => !tile.classList.contains("tm-favorite-clone"))
+      .forEach((tile) => {
       const info = getNameInfoFromTile(tile);
       const isMatch = Boolean(info && selected.has(info.key));
       tile.classList.toggle("tm-name-match", isMatch);
@@ -290,12 +312,57 @@
       if (info) {
         tileNameCache.set(tile, info.key);
       }
+
+      if (info && favorites.has(info.key)) {
+        const host = tile.parentElement;
+        if (!host) {
+          return;
+        }
+        const list = favoriteTilesByHost.get(host) || [];
+        list.push(tile);
+        favoriteTilesByHost.set(host, list);
+      }
     });
+
+    renderFavoriteTilesSections(favoriteTilesByHost);
 
     const status = document.querySelector(`#${PANEL_ID} .tm-status`);
     if (status) {
       status.textContent = `${hits} Treffer sichtbar`;
     }
+  }
+
+  function getOrCreateFavoriteSection(host) {
+    let section = host.querySelector(`:scope > .${FAVORITES_SECTION_CLASS}`);
+    if (!section) {
+      section = document.createElement("div");
+      section.className = FAVORITES_SECTION_CLASS;
+      section.innerHTML = `<div class="tm-favorites-tiles-title">Favoriten</div><div class="${FAVORITES_SECTION_CARDS_CLASS}"></div>`;
+      host.insertBefore(section, host.firstChild);
+    }
+    return section;
+  }
+
+  function cleanupFavoriteSections() {
+    document.querySelectorAll(`.${FAVORITES_SECTION_CLASS}`).forEach((section) => section.remove());
+  }
+
+  function renderFavoriteTilesSections(favoriteTilesByHost) {
+    cleanupFavoriteSections();
+    favoriteTilesByHost.forEach((favoriteTiles, host) => {
+      if (!favoriteTiles.length) {
+        return;
+      }
+      const section = getOrCreateFavoriteSection(host);
+      const cards = section.querySelector(`.${FAVORITES_SECTION_CARDS_CLASS}`);
+      cards.innerHTML = "";
+      favoriteTiles.forEach((tile) => {
+        const clone = tile.cloneNode(true);
+        clone.classList.add("tm-favorite-clone");
+        cards.appendChild(clone);
+      });
+      host.insertBefore(section, host.firstChild);
+    });
   }
 
   function applyPresenceAccentModeClass() {
@@ -356,7 +423,11 @@
       .map((key) => {
         const label = state.discoveredNames[key];
         const color = getColorForNameKey(key);
-        return `<div class="tm-selected-item"><span>${label}</span><input type="color" data-color-key="${key}" value="${color}"></div>`;
+        const isFavorite = state.favoriteNames.includes(key);
+        const favoriteClass = isFavorite ? "is-favorite" : "";
+        const favoriteIcon = isFavorite ? "★" : "☆";
+        const favoriteTitle = isFavorite ? "Favorit entfernen" : "Als Favorit markieren";
+        return `<div class="tm-selected-item"><div class="tm-name-main"><button type="button" class="tm-favorite-toggle ${favoriteClass}" data-favorite-key="${key}" title="${favoriteTitle}" aria-label="${favoriteTitle}">${favoriteIcon}</button><span>${label}</span></div><input type="color" data-color-key="${key}" value="${color}"></div>`;
       });
 
     list.innerHTML = rows.join("") || "<div>Keine Namen ausgewählt</div>";
@@ -459,12 +530,32 @@
           return;
         }
         state.selectedNames = [];
+        state.favoriteNames = [];
         persistState();
         renderDiscoveredList();
         renderSelectedList();
         scheduleHighlighting();
       } else if (action === "close") {
         togglePanel(false);
+      } else {
+        const favoriteButton = button.closest(".tm-favorite-toggle");
+        if (!favoriteButton) {
+          return;
+        }
+        const key = favoriteButton.getAttribute("data-favorite-key");
+        if (!key || !state.selectedNames.includes(key)) {
+          return;
+        }
+        const favorites = new Set(state.favoriteNames);
+        if (favorites.has(key)) {
+          favorites.delete(key);
+        } else {
+          favorites.add(key);
+        }
+        state.favoriteNames = Array.from(favorites);
+        persistState();
+        renderSelectedList();
+        scheduleHighlighting();
       }
     });
 
@@ -490,6 +581,7 @@
           selected.delete(key);
         }
         state.selectedNames = Array.from(selected);
+        state.favoriteNames = state.favoriteNames.filter((favoriteKey) => selected.has(favoriteKey));
         persistState();
         renderDiscoveredList();
         renderSelectedList();
@@ -580,17 +672,30 @@
 
   function onMutations(mutations) {
     let hasRelevant = false;
+    const hasRealTile = (node) => {
+      if (!(node instanceof Element)) {
+        return false;
+      }
+      if (node.closest(`.${FAVORITES_SECTION_CLASS}`)) {
+        return false;
+      }
+      if (node.matches?.(`${TILE_SELECTOR}:not(.tm-favorite-clone)`)) {
+        return true;
+      }
+      return Boolean(node.querySelector?.(`${TILE_SELECTOR}:not(.tm-favorite-clone)`));
+    };
+
     mutations.forEach((mutation) => {
       if (mutation.type !== "childList") {
         return;
       }
       mutation.addedNodes.forEach((node) => {
-        if (node.nodeType === 1 && (node.matches?.(TILE_SELECTOR) || node.querySelector?.(TILE_SELECTOR))) {
+        if (hasRealTile(node)) {
           hasRelevant = true;
         }
       });
       mutation.removedNodes.forEach((node) => {
-        if (node.nodeType === 1 && (node.matches?.(TILE_SELECTOR) || node.querySelector?.(TILE_SELECTOR))) {
+        if (hasRealTile(node)) {
           hasRelevant = true;
         }
       });
