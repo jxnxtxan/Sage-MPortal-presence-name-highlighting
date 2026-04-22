@@ -8,6 +8,9 @@ Tampermonkey-Userscript fuer mPortal, um Personen im Anwesenheits-Display schnel
 - Auswahl von Namen ueber ein Dropdown mit Checkboxen
 - Suchfeld im Dropdown zum schnellen Filtern
 - Individuelle Farbe pro Person + globale Standardfarbe
+- Favoriten pro ausgewaehlter Person per Stern (☆/★) im Panel
+- Separate Favoriten-Leiste oberhalb der normalen Kacheln (nur sichtbar, wenn Favoriten gesetzt sind)
+- Favoriten-Kacheln werden zusaetzlich angezeigt, Original-Kacheln bleiben unveraendert in der normalen Liste
 - Persistente Speicherung (Auswahl, Farben, Optionen)
 - Modus fuer Namensquelle:
   - Nur sichtbare Kacheln
@@ -37,9 +40,11 @@ Tampermonkey-Userscript fuer mPortal, um Personen im Anwesenheits-Display schnel
 2. Im Panel:
    - **Namen auswaehlen** oeffnen
    - Personen per Checkbox an-/abwaehlen
+   - Optional Personen ueber den Stern als Favorit markieren
    - Optional pro Person Farbe setzen
    - Optional Standardfarbe setzen
 3. Optional Namensquelle und Status-Balken-Modus einstellen.
+4. Favoriten erscheinen in einer separaten Leiste oben und werden nebeneinander angezeigt.
 
 ## Gespeicherte Daten
 
@@ -47,6 +52,7 @@ Das Script speichert lokale Einstellungen (via GM Storage, Fallback `localStorag
 
 - Gefundene Namen
 - Ausgewaehlte Namen
+- Favoriten-Namen
 - Farbzuteilungen pro Name
 - Standardfarbe
 - Modus fuer Namensquelle
@@ -55,7 +61,7 @@ Das Script speichert lokale Einstellungen (via GM Storage, Fallback `localStorag
 ## Bedienelemente
 
 - **Jetzt aktualisieren**: Liste mit Namen manuell neu synchronisieren
-- **Auswahl leeren**: Loescht ausgewaehlte Namen (mit Sicherheitsabfrage)
+- **Auswahl leeren**: Loescht ausgewaehlte Namen und Favoriten (mit Sicherheitsabfrage)
 - **Schliessen**: Panel schliessen
 
 ## Troubleshooting
