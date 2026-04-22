@@ -1,9 +1,11 @@
 // ==UserScript==
 // @name         mPortal Name Highlighter
 // @namespace    local.tampermonkey.mportal
-// @version      2.0.0
+// @version      2.0.1
 // @description  Auto-detect names in presence tiles, select via dropdown, and assign highlight colors.
 // @author       jxnxtxan
+// @downloadURL  https://raw.githubusercontent.com/jxnxtxan/Sage-MPortal-presence-name-highlighting/main/mportal-name-highlighter.user.js
+// @updateURL    https://raw.githubusercontent.com/jxnxtxan/Sage-MPortal-presence-name-highlighting/main/mportal-name-highlighter.user.js
 // @match        *://*/HRPortal/*/Time/Presence
 // @grant        GM_getValue
 // @grant        GM_setValue

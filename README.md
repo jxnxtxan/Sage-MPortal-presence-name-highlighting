@@ -29,10 +29,12 @@ Tampermonkey-Userscript fuer mPortal, um Personen im Anwesenheits-Display schnel
 ## Installation
 
 1. Tampermonkey installieren.
-2. In Tampermonkey ein neues Script anlegen.
-3. Inhalt von `mportal-name-highlighter.user.js` einfuegen.
-4. Speichern.
-5. mPortal Anwesenheitsseite neu laden.
+2. Script direkt ueber diesen Link installieren:
+   - [mportal-name-highlighter.user.js (Auto-Update)](https://raw.githubusercontent.com/jxnxtxan/Sage-MPortal-presence-name-highlighting/main/mportal-name-highlighter.user.js)
+3. Installation in Tampermonkey bestaetigen.
+4. mPortal Anwesenheitsseite neu laden.
+
+Hinweis: Updates werden automatisch erkannt, sobald die Versionsnummer im Script erhoeht wird.
 
 ## Verwendung
 
