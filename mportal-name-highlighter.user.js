@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         mPortal Name Highlighter
 // @namespace    local.tampermonkey.mportal
-// @version      2.0.5
+// @version      2.0.6
 // @description  Auto-detect names in presence tiles, select via dropdown, and assign highlight colors.
 // @author       jxnxtxan
 // @downloadURL  https://raw.githubusercontent.com/jxnxtxan/Sage-MPortal-presence-name-highlighting/main/mportal-name-highlighter.user.js
@@ -961,11 +961,51 @@
 
     panel.querySelector(".tm-search").addEventListener("input", renderDiscoveredList);
 
+    function isHeaderHighlightToggleClick(event) {
+      return Boolean(event.target.closest(`#${TOGGLE_ID}`));
+    }
+
     document.addEventListener("click", (event) => {
-      if (!panel.contains(event.target) && event.target.id !== TOGGLE_ID) {
+      if (isHeaderHighlightToggleClick(event)) {
+        return;
+      }
+      const inPanel = panel.contains(event.target);
+      if (!inPanel) {
+        toggleDropdown(false);
+        if (state.panelVisible) {
+          togglePanel(false);
+        }
+        return;
+      }
+      const dropdown = panel.querySelector(".tm-dropdown");
+      if (state.dropdownOpen && dropdown && !dropdown.contains(event.target)) {
         toggleDropdown(false);
       }
     });
+
+    document.addEventListener(
+      "keydown",
+      (event) => {
+        if (event.key !== "Escape") {
+          return;
+        }
+        if (!state.panelVisible && !state.dropdownOpen) {
+          return;
+        }
+        if (state.dropdownOpen) {
+          event.preventDefault();
+          event.stopPropagation();
+          toggleDropdown(false);
+          return;
+        }
+        if (state.panelVisible) {
+          event.preventDefault();
+          event.stopPropagation();
+          togglePanel(false);
+        }
+      },
+      true
+    );
 
     renderDiscoveredList();
     renderSelectedList();
