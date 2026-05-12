@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         mPortal Name Highlighter
 // @namespace    local.tampermonkey.mportal
-// @version      2.0.1
+// @version      2.0.5
 // @description  Auto-detect names in presence tiles, select via dropdown, and assign highlight colors.
 // @author       jxnxtxan
 // @downloadURL  https://raw.githubusercontent.com/jxnxtxan/Sage-MPortal-presence-name-highlighting/main/mportal-name-highlighter.user.js
@@ -9,11 +9,106 @@
 // @match        *://*/HRPortal/*/Time/Presence
 // @grant        GM_getValue
 // @grant        GM_setValue
-// @run-at       document-idle
+// @run-at       document-start
 // ==/UserScript==
 
 (function () {
   "use strict";
+
+  const PRESENCE_API_PATH = "/hrportalapi/Time/Presence";
+  const PRESENCE_POST_MIN_BATCH = 500;
+
+  function injectPresencePostBodyAmplifier() {
+    const script = document.createElement("script");
+    script.textContent = `(() => {
+      if (window.__tmMportalPresenceAmplify) {
+        return;
+      }
+      window.__tmMportalPresenceAmplify = true;
+      var TARGET = ${JSON.stringify(PRESENCE_API_PATH)};
+      var MIN_TAKE = ${PRESENCE_POST_MIN_BATCH};
+      var TAKE_KEYS = ["Take", "take", "PageSize", "pageSize", "RowCount", "rowCount", "MaxRows", "maxRows", "Size", "size", "Count", "count", "Top", "top", "Limit", "limit"];
+      function bumpTakeDeep(o) {
+        if (!o || typeof o !== "object") {
+          return false;
+        }
+        if (Array.isArray(o)) {
+          for (var i = 0; i < o.length; i++) {
+            if (bumpTakeDeep(o[i])) {
+              return true;
+            }
+          }
+          return false;
+        }
+        for (var k = 0; k < TAKE_KEYS.length; k++) {
+          var key = TAKE_KEYS[k];
+          if (Object.prototype.hasOwnProperty.call(o, key) && typeof o[key] === "number" && o[key] > 0) {
+            o[key] = Math.max(o[key], MIN_TAKE);
+            return true;
+          }
+        }
+        var keys = Object.keys(o);
+        for (var j = 0; j < keys.length; j++) {
+          if (bumpTakeDeep(o[keys[j]])) {
+            return true;
+          }
+        }
+        return false;
+      }
+      function maybeRewritePresenceJsonBody(bodyText) {
+        if (typeof bodyText !== "string" || !bodyText) {
+          return bodyText;
+        }
+        try {
+          var parsed = JSON.parse(bodyText);
+          bumpTakeDeep(parsed);
+          return JSON.stringify(parsed);
+        } catch (e) {
+          return bodyText;
+        }
+      }
+      var origOpen = XMLHttpRequest.prototype.open;
+      XMLHttpRequest.prototype.open = function (method, url) {
+        try {
+          this.__tmPresenceReqUrl = typeof url === "string" ? url : String(url || "");
+        } catch (e2) {
+          this.__tmPresenceReqUrl = "";
+        }
+        return origOpen.apply(this, arguments);
+      };
+      var origSend = XMLHttpRequest.prototype.send;
+      XMLHttpRequest.prototype.send = function (body) {
+        try {
+          var u = this.__tmPresenceReqUrl || "";
+          if (u.indexOf(TARGET) !== -1 && typeof body === "string") {
+            body = maybeRewritePresenceJsonBody(body);
+          }
+        } catch (e3) {}
+        return origSend.call(this, body);
+      };
+      if (typeof window.fetch === "function") {
+        var origFetch = window.fetch;
+        window.fetch = function (input, init) {
+          try {
+            var url = typeof input === "string" ? input : input && input.url ? input.url : "";
+            var method = (init && init.method) || "GET";
+            if (method && String(method).toUpperCase() === "POST" && url.indexOf(TARGET) !== -1 && init && typeof init.body === "string") {
+              var next = Object.assign({}, init, { body: maybeRewritePresenceJsonBody(init.body) });
+              return origFetch.call(this, input, next);
+            }
+          } catch (e4) {}
+          return origFetch.apply(this, arguments);
+        };
+      }
+    })();`;
+    const root = document.documentElement || document.head || document.body;
+    if (root) {
+      root.appendChild(script);
+    }
+    script.remove();
+  }
+
+  injectPresencePostBodyAmplifier();
 
   const STORAGE_PREFIX = "mportalNameHighlighterV2";
   const LEGACY_NAMES_KEY = "mportalHighlightedNames";
@@ -21,6 +116,9 @@
   const DEFAULT_HIGHLIGHT_COLOR = "#ffb020";
   const DEFAULT_COLLECTION_MODE = "all_loaded";
   const DEFAULT_PRESENCE_ACCENT_MODE = "all";
+  const FAVORITE_PREFETCH_MAX_STEPS = 90;
+  const FAVORITE_PREFETCH_STEP_DELAY_MS = 160;
+  const FAVORITE_PREFETCH_SCHEDULE_MS = 380;
 
   const PANEL_ID = "tm-name-highlight-panel";
   const TOGGLE_ID = "tm-name-highlight-toggle";
@@ -59,6 +157,9 @@
   let uiObserver = null;
   let highlightDebounce = null;
   let discoveryDebounce = null;
+  let favoritePrefetchDebounce = null;
+  let favoritePrefetchToken = 0;
+  let favoritePrefetchExhaustedFp = "";
 
   function normalizeName(value) {
     return (value || "")
@@ -181,6 +282,20 @@
     return key ? { key, label } : null;
   }
 
+  function dedupeTilesByNameKey(tiles) {
+    const seen = new Set();
+    const out = [];
+    tiles.forEach((tile) => {
+      const info = getNameInfoFromTile(tile);
+      if (!info || seen.has(info.key)) {
+        return;
+      }
+      seen.add(info.key);
+      out.push(tile);
+    });
+    return out;
+  }
+
   function getTilesByMode() {
     const allTiles = Array.from(document.querySelectorAll(TILE_SELECTOR)).filter(
       (tile) => !tile.classList.contains("tm-favorite-clone")
@@ -272,6 +387,9 @@
       .${FAVORITES_SECTION_CLASS} .tm-favorites-tiles-title { font-size: 12px; font-weight: 600; color: #3f4f68; margin-bottom: 8px; }
       .${FAVORITES_SECTION_CARDS_CLASS} { display: flex; flex-wrap: wrap; gap: 8px; }
       .${FAVORITES_SECTION_CARDS_CLASS} .tm-favorite-clone { flex: 0 1 220px; max-width: 260px; }
+      .${FAVORITES_SECTION_CARDS_CLASS} .tm-favorite-placeholder { flex: 0 1 220px; max-width: 260px; box-sizing: border-box; min-height: 72px; padding: 10px 12px; border: 1px dashed #9eacc5; border-radius: 8px; background: #fff; color: #3f4f68; font-size: 13px; line-height: 1.35; display: flex; flex-direction: column; justify-content: center; gap: 4px; }
+      .${FAVORITES_SECTION_CARDS_CLASS} .tm-favorite-placeholder .tm-favorite-placeholder-name { font-weight: 600; }
+      .${FAVORITES_SECTION_CARDS_CLASS} .tm-favorite-placeholder .tm-favorite-placeholder-hint { font-size: 11px; color: #5b6980; font-weight: 400; }
       html.tm-presence-accent-all ${TILE_SELECTOR} > div[data-bind*="presenceState"],
       html.tm-presence-accent-selected ${TILE_SELECTOR}.tm-name-match > div[data-bind*="presenceState"] { width: 10px !important; border-right: 1px solid rgba(255,255,255,0.65); box-shadow: inset -1px 0 0 rgba(0,0,0,0.2), inset 0 0 0 1px rgba(255,255,255,0.2); filter: saturate(1.3) contrast(1.12) brightness(1.05); border-radius: 0; transition: box-shadow .15s ease, filter .15s ease; }
       html.tm-presence-accent-all ${TILE_SELECTOR}:hover > div[data-bind*="presenceState"],
@@ -291,6 +409,168 @@
 
   function getColorForNameKey(nameKey) {
     return state.perNameColors[nameKey] || state.defaultColor || DEFAULT_HIGHLIGHT_COLOR;
+  }
+
+  function collectLoadedFavoriteKeysInDom() {
+    const favorites = new Set(state.favoriteNames);
+    const loaded = new Set();
+    if (!favorites.size) {
+      return loaded;
+    }
+    Array.from(document.querySelectorAll(TILE_SELECTOR))
+      .filter((tile) => !tile.classList.contains("tm-favorite-clone"))
+      .forEach((tile) => {
+        const info = getNameInfoFromTile(tile);
+        if (info && favorites.has(info.key)) {
+          loaded.add(info.key);
+        }
+      });
+    return loaded;
+  }
+
+  function collectMissingFavoriteKeysAgainstDom() {
+    const selected = getSelectedSet();
+    const loaded = collectLoadedFavoriteKeysInDom();
+    return state.favoriteNames.filter((key) => selected.has(key) && !loaded.has(key));
+  }
+
+  function fingerprintMissingFavoriteKeys(keys) {
+    return keys.slice().sort().join("\u0001");
+  }
+
+  function pickBestListScroller(sampleTile) {
+    if (!(sampleTile instanceof Element)) {
+      return null;
+    }
+    const candidates = [];
+    let cur = sampleTile.parentElement;
+    while (cur && cur instanceof HTMLElement) {
+      const style = window.getComputedStyle(cur);
+      const oy = style.overflowY;
+      const scrollableY = oy === "auto" || oy === "scroll" || oy === "overlay";
+      if (scrollableY && cur.scrollHeight > cur.clientHeight + 6) {
+        candidates.push(cur);
+      }
+      cur = cur.parentElement;
+    }
+    if (!candidates.length) {
+      const root = document.scrollingElement || document.documentElement;
+      if (root instanceof HTMLElement && root.scrollHeight > root.clientHeight + 6) {
+        return root;
+      }
+      return null;
+    }
+    return candidates.reduce((best, el) => {
+      const range = el.scrollHeight - el.clientHeight;
+      const bestRange = best.scrollHeight - best.clientHeight;
+      return range > bestRange ? el : best;
+    });
+  }
+
+  function finishFavoritePrefetch(scroller, savedTop, token, exhaustedMissingFp) {
+    if (token !== favoritePrefetchToken) {
+      return;
+    }
+    if (scroller) {
+      scroller.scrollTop = savedTop;
+    }
+    if (exhaustedMissingFp) {
+      favoritePrefetchExhaustedFp = exhaustedMissingFp;
+    } else {
+      favoritePrefetchExhaustedFp = "";
+    }
+    refreshDiscoveryIncremental();
+  }
+
+  function runFavoriteTilePrefetchForMissing(options) {
+    const force = Boolean(options && options.force);
+    if (force) {
+      favoritePrefetchExhaustedFp = "";
+    }
+    const missingStart = collectMissingFavoriteKeysAgainstDom();
+    if (!missingStart.length) {
+      return;
+    }
+    if (!force && fingerprintMissingFavoriteKeys(missingStart) === favoritePrefetchExhaustedFp) {
+      return;
+    }
+    const sample = document.querySelector(`${TILE_SELECTOR}:not(.tm-favorite-clone)`);
+    if (!sample) {
+      return;
+    }
+    const scroller = pickBestListScroller(sample);
+    if (!scroller) {
+      return;
+    }
+
+    const myToken = ++favoritePrefetchToken;
+    const savedTop = scroller.scrollTop;
+    let steps = 0;
+    let stagnantMoves = 0;
+
+    const step = () => {
+      if (myToken !== favoritePrefetchToken) {
+        return;
+      }
+
+      const stillMissing = collectMissingFavoriteKeysAgainstDom();
+      if (!stillMissing.length) {
+        finishFavoritePrefetch(scroller, savedTop, myToken, "");
+        return;
+      }
+      if (steps >= FAVORITE_PREFETCH_MAX_STEPS) {
+        finishFavoritePrefetch(
+          scroller,
+          savedTop,
+          myToken,
+          fingerprintMissingFavoriteKeys(stillMissing)
+        );
+        return;
+      }
+
+      const maxScroll = Math.max(0, scroller.scrollHeight - scroller.clientHeight);
+      const prevTop = scroller.scrollTop;
+      const delta = Math.max(200, Math.floor(scroller.clientHeight * 0.82));
+      scroller.scrollTop = Math.min(prevTop + delta, maxScroll);
+      steps += 1;
+
+      const moved = scroller.scrollTop > prevTop + 0.5;
+      if (!moved) {
+        stagnantMoves += 1;
+      } else {
+        stagnantMoves = 0;
+      }
+
+      const atBottom = scroller.scrollTop >= maxScroll - 2;
+      if (atBottom || stagnantMoves >= 4) {
+        finishFavoritePrefetch(
+          scroller,
+          savedTop,
+          myToken,
+          fingerprintMissingFavoriteKeys(stillMissing)
+        );
+        return;
+      }
+
+      window.setTimeout(step, FAVORITE_PREFETCH_STEP_DELAY_MS);
+    };
+
+    window.setTimeout(step, 120);
+  }
+
+  function scheduleFavoritePrefetchForMissing() {
+    window.clearTimeout(favoritePrefetchDebounce);
+    favoritePrefetchDebounce = window.setTimeout(() => {
+      const missing = collectMissingFavoriteKeysAgainstDom();
+      if (!missing.length) {
+        favoritePrefetchExhaustedFp = "";
+        return;
+      }
+      if (fingerprintMissingFavoriteKeys(missing) === favoritePrefetchExhaustedFp) {
+        return;
+      }
+      runFavoriteTilePrefetchForMissing({ force: false });
+    }, FAVORITE_PREFETCH_SCHEDULE_MS);
   }
 
   function applyHighlighting() {
@@ -326,7 +606,22 @@
       }
     });
 
-    renderFavoriteTilesSections(favoriteTilesByHost);
+    favoriteTilesByHost.forEach((tiles, host) => {
+      favoriteTilesByHost.set(host, dedupeTilesByNameKey(tiles));
+    });
+
+    const loadedFavoriteKeys = collectLoadedFavoriteKeysInDom();
+    const missingFavoriteKeys = state.favoriteNames.filter(
+      (key) => state.selectedNames.includes(key) && !loadedFavoriteKeys.has(key)
+    );
+
+    renderFavoriteTilesSections(favoriteTilesByHost, missingFavoriteKeys);
+
+    if (!missingFavoriteKeys.length) {
+      favoritePrefetchExhaustedFp = "";
+    } else {
+      scheduleFavoritePrefetchForMissing();
+    }
 
     const status = document.querySelector(`#${PANEL_ID} .tm-status`);
     if (status) {
@@ -349,19 +644,56 @@
     document.querySelectorAll(`.${FAVORITES_SECTION_CLASS}`).forEach((section) => section.remove());
   }
 
-  function renderFavoriteTilesSections(favoriteTilesByHost) {
+  function pickPrimaryFavoriteHost(favoriteTilesByHost) {
+    const first = favoriteTilesByHost.keys().next().value;
+    if (first) {
+      return first;
+    }
+    const sample = document.querySelector(`${TILE_SELECTOR}:not(.tm-favorite-clone)`);
+    return sample?.parentElement || null;
+  }
+
+  function renderFavoriteTilesSections(favoriteTilesByHost, missingFavoriteKeys) {
     cleanupFavoriteSections();
+    const primaryHost = pickPrimaryFavoriteHost(favoriteTilesByHost);
+    const byHost = new Map();
+
     favoriteTilesByHost.forEach((favoriteTiles, host) => {
-      if (!favoriteTiles.length) {
+      const entry = byHost.get(host) || { tiles: [], placeholders: [] };
+      entry.tiles.push(...favoriteTiles);
+      byHost.set(host, entry);
+    });
+
+    if (missingFavoriteKeys.length && primaryHost) {
+      const entry = byHost.get(primaryHost) || { tiles: [], placeholders: [] };
+      missingFavoriteKeys.forEach((key) => {
+        if (!entry.placeholders.includes(key)) {
+          entry.placeholders.push(key);
+        }
+      });
+      byHost.set(primaryHost, entry);
+    }
+
+    byHost.forEach(({ tiles, placeholders }, host) => {
+      if (!tiles.length && !placeholders.length) {
         return;
       }
       const section = getOrCreateFavoriteSection(host);
       const cards = section.querySelector(`.${FAVORITES_SECTION_CARDS_CLASS}`);
       cards.innerHTML = "";
-      favoriteTiles.forEach((tile) => {
+      tiles.forEach((tile) => {
         const clone = tile.cloneNode(true);
         clone.classList.add("tm-favorite-clone");
         cards.appendChild(clone);
+      });
+      placeholders.forEach((key) => {
+        const label = state.discoveredNames[key] || key;
+        const wrap = document.createElement("div");
+        wrap.className = "tm-favorite-placeholder";
+        wrap.dataset.nameKey = key;
+        wrap.innerHTML = `<span class="tm-favorite-placeholder-name"></span><span class="tm-favorite-placeholder-hint">Kachel erscheint nach dem Nachladen der Liste (z. B. nach unten scrollen).</span>`;
+        wrap.querySelector(".tm-favorite-placeholder-name").textContent = label;
+        cards.appendChild(wrap);
       });
       host.insertBefore(section, host.firstChild);
     });
@@ -500,6 +832,7 @@
         <div class="tm-selected-list"></div>
         <div class="tm-actions">
           <button type="button" data-action="refresh">Jetzt aktualisieren</button>
+          <button type="button" data-action="prefetch-favorites" title="Liste kurz durchscrollen, damit Favoriten-Kacheln nachgeladen werden">Favoriten nachladen</button>
           <button type="button" data-action="clear">Auswahl leeren</button>
           <button type="button" data-action="close">Schließen</button>
         </div>
@@ -526,6 +859,9 @@
       }
       if (action === "refresh") {
         scheduleDiscoveryUpdate(true);
+      } else if (action === "prefetch-favorites") {
+        window.clearTimeout(favoritePrefetchDebounce);
+        runFavoriteTilePrefetchForMissing({ force: true });
       } else if (action === "clear") {
         const confirmed = window.confirm("Möchtest du wirklich die komplette Auswahl leeren?");
         if (!confirmed) {
@@ -730,5 +1066,20 @@
     startObservers();
   }
 
-  bootstrap();
+  function scheduleBootstrap() {
+    const start = () => {
+      try {
+        bootstrap();
+      } catch (err) {
+        console.warn("[mPortal Name Highlighter] bootstrap failed", err);
+      }
+    };
+    if (document.readyState === "loading") {
+      document.addEventListener("DOMContentLoaded", () => window.setTimeout(start, 0), { once: true });
+    } else {
+      window.setTimeout(start, 0);
+    }
+  }
+
+  scheduleBootstrap();
 })();
