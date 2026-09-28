@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         mPortal Name Highlighter
 // @namespace    local.tampermonkey.mportal
-// @version      2.0.6
+// @version      2.0.7
 // @description  Auto-detect names in presence tiles, select via dropdown, and assign highlight colors.
 // @author       jxnxtxan
 // @downloadURL  https://raw.githubusercontent.com/jxnxtxan/Sage-MPortal-presence-name-highlighting/main/mportal-name-highlighter.user.js
@@ -116,6 +116,20 @@
   const DEFAULT_HIGHLIGHT_COLOR = "#ffb020";
   const DEFAULT_COLLECTION_MODE = "all_loaded";
   const DEFAULT_PRESENCE_ACCENT_MODE = "all";
+  const AUTO_COLOR_PALETTE = [
+    "#ffb020",
+    "#2f80ed",
+    "#27ae60",
+    "#eb5757",
+    "#9b51e0",
+    "#00b8d9",
+    "#ff6fb5",
+    "#8d6e63",
+    "#f2c94c",
+    "#1abc9c",
+    "#e67e22",
+    "#34495e",
+  ];
   const FAVORITE_PREFETCH_MAX_STEPS = 90;
   const FAVORITE_PREFETCH_STEP_DELAY_MS = 160;
   const FAVORITE_PREFETCH_SCHEDULE_MS = 380;
@@ -159,6 +173,7 @@
   let discoveryDebounce = null;
   let favoritePrefetchDebounce = null;
   let favoritePrefetchToken = 0;
+  let favoritePrefetchRunning = false;
   let favoritePrefetchExhaustedFp = "";
 
   function normalizeName(value) {
@@ -168,6 +183,15 @@
       .toLocaleLowerCase("de-DE")
       .normalize("NFD")
       .replace(/[\u0300-\u036f]/g, "");
+  }
+
+  function escapeHtml(value) {
+    return String(value ?? "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
   }
 
   function isElementVisible(el) {
@@ -335,6 +359,13 @@
         tileNameCache.set(tile, info.key);
       }
     });
+    // Keep selected names even if their tile is currently not rendered (virtualized list /
+    // "visible only" mode); otherwise scrolling would silently drop selection, colors and favorites.
+    state.selectedNames.forEach((key) => {
+      if (!next[key] && state.discoveredNames[key]) {
+        next[key] = state.discoveredNames[key];
+      }
+    });
     state.discoveredNames = next;
     state.selectedNames = state.selectedNames.filter((key) => Boolean(next[key]));
     state.favoriteNames = state.favoriteNames.filter((key) => Boolean(next[key]) && state.selectedNames.includes(key));
@@ -411,6 +442,20 @@
     return state.perNameColors[nameKey] || state.defaultColor || DEFAULT_HIGHLIGHT_COLOR;
   }
 
+  function ensureDistinctColorForNameKey(nameKey) {
+    const usedByOthers = new Set(
+      state.selectedNames
+        .filter((key) => key !== nameKey)
+        .map((key) => getColorForNameKey(key).toLowerCase())
+    );
+    const current = state.perNameColors[nameKey];
+    if (current && !usedByOthers.has(current.toLowerCase())) {
+      return;
+    }
+    const free = AUTO_COLOR_PALETTE.find((color) => !usedByOthers.has(color));
+    state.perNameColors[nameKey] = free || AUTO_COLOR_PALETTE[usedByOthers.size % AUTO_COLOR_PALETTE.length];
+  }
+
   function collectLoadedFavoriteKeysInDom() {
     const favorites = new Set(state.favoriteNames);
     const loaded = new Set();
@@ -471,6 +516,7 @@
     if (token !== favoritePrefetchToken) {
       return;
     }
+    favoritePrefetchRunning = false;
     if (scroller) {
       scroller.scrollTop = savedTop;
     }
@@ -483,6 +529,9 @@
   }
 
   function runFavoriteTilePrefetchForMissing(options) {
+    if (favoritePrefetchRunning) {
+      return;
+    }
     const force = Boolean(options && options.force);
     if (force) {
       favoritePrefetchExhaustedFp = "";
@@ -504,6 +553,7 @@
     }
 
     const myToken = ++favoritePrefetchToken;
+    favoritePrefetchRunning = true;
     const savedTop = scroller.scrollTop;
     let steps = 0;
     let stagnantMoves = 0;
@@ -732,7 +782,7 @@
     list.innerHTML = items
       .map(([key, label]) => {
         const checked = selected.has(key) ? "checked" : "";
-        return `<label class="tm-option"><input type="checkbox" data-name-key="${key}" ${checked}><span>${label}</span></label>`;
+        return `<label class="tm-option"><input type="checkbox" data-name-key="${escapeHtml(key)}" ${checked}><span>${escapeHtml(label)}</span></label>`;
       })
       .join("");
 
@@ -761,7 +811,8 @@
         const favoriteClass = isFavorite ? "is-favorite" : "";
         const favoriteIcon = isFavorite ? "★" : "☆";
         const favoriteTitle = isFavorite ? "Favorit entfernen" : "Als Favorit markieren";
-        return `<div class="tm-selected-item"><div class="tm-name-main"><button type="button" class="tm-favorite-toggle ${favoriteClass}" data-favorite-key="${key}" title="${favoriteTitle}" aria-label="${favoriteTitle}">${favoriteIcon}</button><span>${label}</span></div><input type="color" data-color-key="${key}" value="${color}"></div>`;
+        const safeKey = escapeHtml(key);
+        return `<div class="tm-selected-item"><div class="tm-name-main"><button type="button" class="tm-favorite-toggle ${favoriteClass}" data-favorite-key="${safeKey}" title="${favoriteTitle}" aria-label="${favoriteTitle}">${favoriteIcon}</button><span>${escapeHtml(label)}</span></div><input type="color" data-color-key="${safeKey}" value="${escapeHtml(color)}"></div>`;
       });
 
     list.innerHTML = rows.join("") || "<div>Keine Namen ausgewählt</div>";
@@ -915,6 +966,7 @@
         const selected = getSelectedSet();
         if (checkbox.checked) {
           selected.add(key);
+          ensureDistinctColorForNameKey(key);
         } else {
           selected.delete(key);
         }
@@ -969,7 +1021,10 @@
       if (isHeaderHighlightToggleClick(event)) {
         return;
       }
-      const inPanel = panel.contains(event.target);
+      // composedPath() is captured at dispatch time, so it still contains the panel
+      // even if a panel click handler re-rendered (and detached) the clicked element.
+      const path = typeof event.composedPath === "function" ? event.composedPath() : [];
+      const inPanel = path.includes(panel) || panel.contains(event.target);
       if (!inPanel) {
         toggleDropdown(false);
         if (state.panelVisible) {
@@ -978,7 +1033,7 @@
         return;
       }
       const dropdown = panel.querySelector(".tm-dropdown");
-      if (state.dropdownOpen && dropdown && !dropdown.contains(event.target)) {
+      if (state.dropdownOpen && dropdown && !path.includes(dropdown) && !dropdown.contains(event.target)) {
         toggleDropdown(false);
       }
     });

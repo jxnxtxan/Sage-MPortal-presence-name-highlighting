@@ -7,8 +7,9 @@ Tampermonkey-Userscript fuer mPortal, um Personen im Anwesenheits-Display schnel
 - Automatische Erkennung von Namen aus den Anwesenheits-Kacheln
 - Auswahl von Namen ueber ein Dropdown mit Checkboxen
 - Suchfeld im Dropdown zum schnellen Filtern
+- Automatisch unterschiedliche Farbe pro neu ausgewaehlter Person (manuell aenderbar)
 - Individuelle Farbe pro Person + globale Standardfarbe
-- Favoriten pro ausgewaehlter Person per Stern (☆/★) im Panel
+- Favoriten pro ausgewaehlter Person per Stern (☆/★) im Panel (Panel bleibt dabei offen)
 - Separate Favoriten-Leiste oberhalb der normalen Kacheln (nur sichtbar, wenn Favoriten gesetzt sind)
 - Favoriten-Kacheln werden zusaetzlich angezeigt, Original-Kacheln bleiben unveraendert in der normalen Liste
 - Persistente Speicherung (Auswahl, Farben, Optionen)
