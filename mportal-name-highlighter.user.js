@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         mPortal Name Highlighter
 // @namespace    local.tampermonkey.mportal
-// @version      2.0.7
+// @version      2.1.0
 // @description  Auto-detect names in presence tiles, select via dropdown, and assign highlight colors.
 // @author       jxnxtxan
 // @downloadURL  https://raw.githubusercontent.com/jxnxtxan/Sage-MPortal-presence-name-highlighting/main/mportal-name-highlighter.user.js
@@ -18,104 +18,74 @@
   const PRESENCE_API_PATH = "/hrportalapi/Time/Presence";
   const PRESENCE_POST_MIN_BATCH = 500;
 
-  function injectPresencePostBodyAmplifier() {
-    const script = document.createElement("script");
-    script.textContent = `(() => {
-      if (window.__tmMportalPresenceAmplify) {
-        return;
-      }
-      window.__tmMportalPresenceAmplify = true;
-      var TARGET = ${JSON.stringify(PRESENCE_API_PATH)};
-      var MIN_TAKE = ${PRESENCE_POST_MIN_BATCH};
-      var TAKE_KEYS = ["Take", "take", "PageSize", "pageSize", "RowCount", "rowCount", "MaxRows", "maxRows", "Size", "size", "Count", "count", "Top", "top", "Limit", "limit"];
-      function bumpTakeDeep(o) {
-        if (!o || typeof o !== "object") {
-          return false;
-        }
-        if (Array.isArray(o)) {
-          for (var i = 0; i < o.length; i++) {
-            if (bumpTakeDeep(o[i])) {
-              return true;
-            }
-          }
-          return false;
-        }
-        for (var k = 0; k < TAKE_KEYS.length; k++) {
-          var key = TAKE_KEYS[k];
-          if (Object.prototype.hasOwnProperty.call(o, key) && typeof o[key] === "number" && o[key] > 0) {
-            o[key] = Math.max(o[key], MIN_TAKE);
-            return true;
-          }
-        }
-        var keys = Object.keys(o);
-        for (var j = 0; j < keys.length; j++) {
-          if (bumpTakeDeep(o[keys[j]])) {
-            return true;
-          }
-        }
+  // Runs in the page context (injected as source), so it must not reference anything outside itself.
+  function presencePostBodyAmplifier(target, minTake) {
+    if (window.__tmMportalPresenceAmplify) {
+      return;
+    }
+    window.__tmMportalPresenceAmplify = true;
+    const TAKE_KEYS = ["take", "pagesize", "rowcount", "maxrows", "size", "count", "top", "limit"];
+
+    function bumpTakeDeep(o) {
+      if (!o || typeof o !== "object") {
         return false;
       }
-      function maybeRewritePresenceJsonBody(bodyText) {
-        if (typeof bodyText !== "string" || !bodyText) {
-          return bodyText;
-        }
-        try {
-          var parsed = JSON.parse(bodyText);
-          bumpTakeDeep(parsed);
-          return JSON.stringify(parsed);
-        } catch (e) {
-          return bodyText;
+      if (Array.isArray(o)) {
+        return o.some(bumpTakeDeep);
+      }
+      const keys = Object.keys(o);
+      for (const name of TAKE_KEYS) {
+        const key = keys.find((k) => k.toLowerCase() === name && typeof o[k] === "number" && o[k] > 0);
+        if (key) {
+          o[key] = Math.max(o[key], minTake);
+          return true;
         }
       }
-      var origOpen = XMLHttpRequest.prototype.open;
-      XMLHttpRequest.prototype.open = function (method, url) {
-        try {
-          this.__tmPresenceReqUrl = typeof url === "string" ? url : String(url || "");
-        } catch (e2) {
-          this.__tmPresenceReqUrl = "";
-        }
-        return origOpen.apply(this, arguments);
-      };
-      var origSend = XMLHttpRequest.prototype.send;
-      XMLHttpRequest.prototype.send = function (body) {
-        try {
-          var u = this.__tmPresenceReqUrl || "";
-          if (u.indexOf(TARGET) !== -1 && typeof body === "string") {
-            body = maybeRewritePresenceJsonBody(body);
-          }
-        } catch (e3) {}
-        return origSend.call(this, body);
-      };
-      if (typeof window.fetch === "function") {
-        var origFetch = window.fetch;
-        window.fetch = function (input, init) {
-          try {
-            var url = typeof input === "string" ? input : input && input.url ? input.url : "";
-            var method = (init && init.method) || "GET";
-            if (method && String(method).toUpperCase() === "POST" && url.indexOf(TARGET) !== -1 && init && typeof init.body === "string") {
-              var next = Object.assign({}, init, { body: maybeRewritePresenceJsonBody(init.body) });
-              return origFetch.call(this, input, next);
-            }
-          } catch (e4) {}
-          return origFetch.apply(this, arguments);
-        };
-      }
-    })();`;
-    const root = document.documentElement || document.head || document.body;
-    if (root) {
-      root.appendChild(script);
+      return keys.some((k) => bumpTakeDeep(o[k]));
     }
-    script.remove();
+
+    function rewriteBody(body) {
+      try {
+        const parsed = JSON.parse(body);
+        bumpTakeDeep(parsed);
+        return JSON.stringify(parsed);
+      } catch (_error) {
+        return body;
+      }
+    }
+
+    const origOpen = XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open = function (method, url) {
+      this.__tmPresenceReqUrl = String(url || "");
+      return origOpen.apply(this, arguments);
+    };
+    const origSend = XMLHttpRequest.prototype.send;
+    XMLHttpRequest.prototype.send = function (body) {
+      if ((this.__tmPresenceReqUrl || "").includes(target) && typeof body === "string" && body) {
+        body = rewriteBody(body);
+      }
+      return origSend.call(this, body);
+    };
+
+    const origFetch = window.fetch;
+    if (typeof origFetch === "function") {
+      window.fetch = function (input, init) {
+        const url = typeof input === "string" ? input : input?.url || "";
+        if (url.includes(target) && String(init?.method).toUpperCase() === "POST" && typeof init.body === "string" && init.body) {
+          return origFetch.call(this, input, { ...init, body: rewriteBody(init.body) });
+        }
+        return origFetch.apply(this, arguments);
+      };
+    }
   }
 
-  injectPresencePostBodyAmplifier();
+  const amplifierScript = document.createElement("script");
+  amplifierScript.textContent = `(${presencePostBodyAmplifier})(${JSON.stringify(PRESENCE_API_PATH)}, ${PRESENCE_POST_MIN_BATCH});`;
+  document.documentElement.appendChild(amplifierScript);
+  amplifierScript.remove();
 
   const STORAGE_PREFIX = "mportalNameHighlighterV2";
-  const LEGACY_NAMES_KEY = "mportalHighlightedNames";
-  const LEGACY_COLOR_KEY = "mportalHighlightColor";
   const DEFAULT_HIGHLIGHT_COLOR = "#ffb020";
-  const DEFAULT_COLLECTION_MODE = "all_loaded";
-  const DEFAULT_PRESENCE_ACCENT_MODE = "all";
   const AUTO_COLOR_PALETTE = [
     "#ffb020",
     "#2f80ed",
@@ -138,43 +108,51 @@
   const TOGGLE_ID = "tm-name-highlight-toggle";
   const STYLE_ID = "tm-name-highlight-style";
   const TILE_SELECTOR = ".sagehr-tile";
+  const REAL_TILE_SELECTOR = `${TILE_SELECTOR}:not(.tm-favorite-clone)`;
   const HEADER_SELECTOR = ".sagehr-dataheader";
   const NAME_CONTAINER_SELECTOR = ".sagehr-tile-small-info > .text-overflow-ellipsis";
   const FAVORITES_SECTION_CLASS = "tm-favorites-tiles-section";
   const FAVORITES_SECTION_CARDS_CLASS = "tm-favorites-tiles-cards";
 
-  const KEYS = {
-    discovered: `${STORAGE_PREFIX}:discoveredNames`,
-    selected: `${STORAGE_PREFIX}:selectedNames`,
-    favorites: `${STORAGE_PREFIX}:favoriteNames`,
-    colors: `${STORAGE_PREFIX}:perNameColors`,
-    defaultColor: `${STORAGE_PREFIX}:defaultColor`,
-    mode: `${STORAGE_PREFIX}:collectionMode`,
-    presenceAccentMode: `${STORAGE_PREFIX}:presenceAccentMode`,
-    migrated: `${STORAGE_PREFIX}:migrated`,
-  };
-
-  const state = {
+  // Persisted fields; each is stored under `${STORAGE_PREFIX}:${field}`.
+  const PERSISTED_DEFAULTS = {
     discoveredNames: {},
     selectedNames: [],
     favoriteNames: [],
     perNameColors: {},
     defaultColor: DEFAULT_HIGHLIGHT_COLOR,
-    collectionMode: DEFAULT_COLLECTION_MODE,
-    presenceAccentMode: DEFAULT_PRESENCE_ACCENT_MODE,
+    collectionMode: "all_loaded",
+    presenceAccentMode: "all",
+  };
+
+  const state = {
+    ...structuredClone(PERSISTED_DEFAULTS),
     panelVisible: false,
     dropdownOpen: false,
   };
 
-  const tileNameCache = new WeakMap();
-  const tileObserver = new MutationObserver(onMutations);
-  let uiObserver = null;
-  let highlightDebounce = null;
-  let discoveryDebounce = null;
-  let favoritePrefetchDebounce = null;
-  let favoritePrefetchToken = 0;
   let favoritePrefetchRunning = false;
   let favoritePrefetchExhaustedFp = "";
+
+  function debounce(fn, ms) {
+    let timer = null;
+    const debounced = (...args) => {
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => fn(...args), ms);
+    };
+    debounced.cancel = () => window.clearTimeout(timer);
+    return debounced;
+  }
+
+  const scheduleHighlighting = debounce(() => applyHighlighting(), 120);
+  const scheduleDiscoveryUpdate = debounce((fullRebuild) => {
+    if (fullRebuild) {
+      rebuildDiscoveredByMode();
+    } else {
+      refreshDiscoveryIncremental();
+    }
+  }, 130);
+  const scheduleFavoritePrefetch = debounce(() => runFavoritePrefetch(false), FAVORITE_PREFETCH_SCHEDULE_MS);
 
   function normalizeName(value) {
     return (value || "")
@@ -182,7 +160,7 @@
       .trim()
       .toLocaleLowerCase("de-DE")
       .normalize("NFD")
-      .replace(/[\u0300-\u036f]/g, "");
+      .replace(/[̀-ͯ]/g, "");
   }
 
   function escapeHtml(value) {
@@ -226,137 +204,53 @@
     } catch (_error) {}
   }
 
-  function getLegacyString(key, fallback) {
-    try {
-      if (typeof GM_getValue === "function") {
-        return GM_getValue(key, fallback);
-      }
-    } catch (_error) {}
-    try {
-      return window.localStorage.getItem(key) || fallback;
-    } catch (_error) {
-      return fallback;
-    }
-  }
-
-  function migrateLegacyDataIfNeeded() {
-    if (getStoredValue(KEYS.migrated, false)) {
-      return;
-    }
-
-    const legacyNamesRaw = getLegacyString(LEGACY_NAMES_KEY, "");
-    const legacyColor = getLegacyString(LEGACY_COLOR_KEY, DEFAULT_HIGHLIGHT_COLOR);
-    const names = legacyNamesRaw
-      .split(/\r?\n/)
-      .map((line) => line.trim())
-      .filter(Boolean);
-
-    if (names.length) {
-      const discovered = {};
-      const selected = [];
-      names.forEach((name) => {
-        const key = normalizeName(name);
-        if (!key) {
-          return;
-        }
-        discovered[key] = name;
-        selected.push(key);
-      });
-      setStoredValue(KEYS.discovered, discovered);
-      setStoredValue(KEYS.selected, selected);
-      setStoredValue(KEYS.defaultColor, legacyColor || DEFAULT_HIGHLIGHT_COLOR);
-    }
-
-    setStoredValue(KEYS.migrated, true);
-  }
-
   function loadState() {
-    migrateLegacyDataIfNeeded();
-    state.discoveredNames = getStoredValue(KEYS.discovered, {});
-    state.selectedNames = getStoredValue(KEYS.selected, []);
-    state.favoriteNames = getStoredValue(KEYS.favorites, []);
-    state.perNameColors = getStoredValue(KEYS.colors, {});
-    state.defaultColor = getStoredValue(KEYS.defaultColor, DEFAULT_HIGHLIGHT_COLOR);
-    state.collectionMode = getStoredValue(KEYS.mode, DEFAULT_COLLECTION_MODE);
-    state.presenceAccentMode = getStoredValue(KEYS.presenceAccentMode, DEFAULT_PRESENCE_ACCENT_MODE);
+    Object.keys(PERSISTED_DEFAULTS).forEach((field) => {
+      state[field] = getStoredValue(`${STORAGE_PREFIX}:${field}`, structuredClone(PERSISTED_DEFAULTS[field]));
+    });
   }
 
-  function persistState() {
-    setStoredValue(KEYS.discovered, state.discoveredNames);
-    setStoredValue(KEYS.selected, state.selectedNames);
-    setStoredValue(KEYS.favorites, state.favoriteNames);
-    setStoredValue(KEYS.colors, state.perNameColors);
-    setStoredValue(KEYS.defaultColor, state.defaultColor);
-    setStoredValue(KEYS.mode, state.collectionMode);
-    setStoredValue(KEYS.presenceAccentMode, state.presenceAccentMode);
+  function persist(...fields) {
+    fields.forEach((field) => setStoredValue(`${STORAGE_PREFIX}:${field}`, state[field]));
   }
 
-  function getNameNodeFromTile(tile) {
-    const direct = tile.querySelector(NAME_CONTAINER_SELECTOR);
-    if (direct && direct.textContent && direct.textContent.trim()) {
-      return direct;
-    }
-    return null;
+  function getRealTiles() {
+    return Array.from(document.querySelectorAll(REAL_TILE_SELECTOR));
   }
 
   function getNameInfoFromTile(tile) {
-    const node = getNameNodeFromTile(tile);
-    const label = (node?.textContent || "").trim();
+    const label = (tile.querySelector(NAME_CONTAINER_SELECTOR)?.textContent || "").trim();
     const key = normalizeName(label);
     return key ? { key, label } : null;
   }
 
-  function dedupeTilesByNameKey(tiles) {
-    const seen = new Set();
-    const out = [];
-    tiles.forEach((tile) => {
-      const info = getNameInfoFromTile(tile);
-      if (!info || seen.has(info.key)) {
-        return;
-      }
-      seen.add(info.key);
-      out.push(tile);
-    });
-    return out;
-  }
-
   function getTilesByMode() {
-    const allTiles = Array.from(document.querySelectorAll(TILE_SELECTOR)).filter(
-      (tile) => !tile.classList.contains("tm-favorite-clone")
-    );
-    if (state.collectionMode === "visible_only") {
-      return allTiles.filter(isElementVisible);
-    }
-    return allTiles;
+    const tiles = getRealTiles();
+    return state.collectionMode === "visible_only" ? tiles.filter(isElementVisible) : tiles;
   }
 
-  function mergeDiscoveredFromTiles(tiles) {
+  function refreshDiscoveryIncremental() {
     let changed = false;
-    tiles.forEach((tile) => {
+    getTilesByMode().forEach((tile) => {
       const info = getNameInfoFromTile(tile);
-      if (!info) {
-        return;
-      }
-      tileNameCache.set(tile, info.key);
-      if (!state.discoveredNames[info.key]) {
+      if (info && !state.discoveredNames[info.key]) {
         state.discoveredNames[info.key] = info.label;
         changed = true;
       }
     });
     if (changed) {
-      persistState();
+      persist("discoveredNames");
       renderDiscoveredList();
     }
+    scheduleHighlighting();
   }
 
   function rebuildDiscoveredByMode() {
-    const tiles = getTilesByMode();
     const next = {};
-    tiles.forEach((tile) => {
+    getTilesByMode().forEach((tile) => {
       const info = getNameInfoFromTile(tile);
       if (info) {
         next[info.key] = info.label;
-        tileNameCache.set(tile, info.key);
       }
     });
     // Keep selected names even if their tile is currently not rendered (virtualized list /
@@ -367,16 +261,15 @@
       }
     });
     state.discoveredNames = next;
-    state.selectedNames = state.selectedNames.filter((key) => Boolean(next[key]));
-    state.favoriteNames = state.favoriteNames.filter((key) => Boolean(next[key]) && state.selectedNames.includes(key));
+    state.selectedNames = state.selectedNames.filter((key) => next[key]);
+    state.favoriteNames = state.favoriteNames.filter((key) => state.selectedNames.includes(key));
     Object.keys(state.perNameColors).forEach((key) => {
       if (!next[key]) {
         delete state.perNameColors[key];
       }
     });
-    persistState();
-    renderDiscoveredList();
-    renderSelectedList();
+    persist("discoveredNames", "selectedNames", "favoriteNames", "perNameColors");
+    renderPanelLists();
     applyHighlighting();
   }
 
@@ -387,55 +280,64 @@
     const style = document.createElement("style");
     style.id = STYLE_ID;
     style.textContent = `
-      #${TOGGLE_ID} { margin-left: 4px; margin-right: 4px; display: flex; align-items: center; }
-      #${TOGGLE_ID} button { border: 1px solid #c5c5c5; border-radius: 4px; background: #fff; color: #222; font-size: 12px; line-height: 1.2; min-height: 28px; padding: 5px 9px; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
-      #${PANEL_ID} { position: fixed; top: 70px; right: 20px; width: 340px; background: #fff; border: 1px solid #bfc6d4; border-radius: 8px; box-shadow: 0 8px 26px rgba(0,0,0,.18); z-index: 2147483647; display: none; font-family: Arial, sans-serif; }
-      #${PANEL_ID}.open { display: block; }
-      #${PANEL_ID} .tm-head { padding: 10px 12px 6px; font-weight: 600; font-size: 13px; }
-      #${PANEL_ID} .tm-body { padding: 0 12px 12px; font-size: 12px; }
-      #${PANEL_ID} .tm-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 8px; }
-      #${PANEL_ID} .tm-dropdown { position: relative; margin-top: 8px; }
-      #${PANEL_ID} .tm-dropdown-toggle { width: 100%; text-align: left; border: 1px solid #9eacc5; border-radius: 6px; padding: 8px 34px 8px 10px; background: #fff; cursor: pointer; position: relative; font-weight: 400; }
-      #${PANEL_ID} .tm-dropdown-toggle::after { content: "▾"; position: absolute; right: 10px; top: 50%; transform: translateY(-50%); color: #44516a; font-size: 14px; pointer-events: none; }
-      #${PANEL_ID}.tm-dropdown-open .tm-dropdown-toggle::after { content: "▴"; }
-      #${PANEL_ID} .tm-dropdown-toggle:hover { background: #f7faff; border-color: #8396b8; }
-      #${PANEL_ID} .tm-picker-hint { margin-top: 4px; font-size: 11px; color: #5b6980; }
-      #${PANEL_ID} .tm-dropdown-menu { display: none; position: absolute; top: calc(100% + 4px); left: 0; right: 0; max-height: 260px; overflow: auto; border: 1px solid #c5c5c5; border-radius: 6px; background: #fff; z-index: 2; padding: 8px; }
-      #${PANEL_ID}.tm-dropdown-open .tm-dropdown-menu { display: block; }
-      #${PANEL_ID} .tm-search { width: 100%; border: 1px solid #d0d6e2; border-radius: 4px; padding: 5px 7px; margin-bottom: 6px; box-sizing: border-box; }
-      #${PANEL_ID} .tm-option { display: flex; align-items: center; gap: 7px; padding: 2px 0; }
-      #${PANEL_ID} .tm-selected-list { margin-top: 8px; border-top: 1px solid #eceff5; padding-top: 8px; max-height: 210px; overflow: auto; }
-      #${PANEL_ID} .tm-selected-item { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
-      #${PANEL_ID} input[type="color"] { width: 45px; height: 26px; border: 1px solid #c5c5c5; border-radius: 4px; padding: 0; cursor: pointer; }
-      #${PANEL_ID} .tm-actions { margin-top: 10px; display: flex; gap: 6px; flex-wrap: wrap; }
-      #${PANEL_ID} .tm-actions button { border: 1px solid #c5c5c5; border-radius: 4px; background: #f8f8f8; font-size: 12px; padding: 5px 8px; cursor: pointer; }
-      #${PANEL_ID} .tm-status { margin-top: 8px; color: #4f5b70; font-size: 11px; }
-      #${PANEL_ID} .tm-name-main { display: flex; align-items: center; gap: 6px; min-width: 0; }
-      #${PANEL_ID} .tm-favorite-toggle { border: 1px solid #c5c5c5; background: #fff; border-radius: 4px; color: #607089; width: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; font-size: 14px; line-height: 1; }
-      #${PANEL_ID} .tm-favorite-toggle.is-favorite { color: #c58600; border-color: #d4b45a; background: #fff8e6; }
-      #${PANEL_ID} .tm-selected-item > span { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-      .${FAVORITES_SECTION_CLASS} { margin: 10px auto; width: calc(100% - 20px); box-sizing: border-box; padding: 8px; border: 1px solid #d9e2f1; border-radius: 8px; background: #f8fbff; }
-      .${FAVORITES_SECTION_CLASS} .tm-favorites-tiles-title { font-size: 12px; font-weight: 600; color: #3f4f68; margin-bottom: 8px; }
-      .${FAVORITES_SECTION_CARDS_CLASS} { display: flex; flex-wrap: wrap; gap: 8px; }
-      .${FAVORITES_SECTION_CARDS_CLASS} .tm-favorite-clone { flex: 0 1 220px; max-width: 260px; }
-      .${FAVORITES_SECTION_CARDS_CLASS} .tm-favorite-placeholder { flex: 0 1 220px; max-width: 260px; box-sizing: border-box; min-height: 72px; padding: 10px 12px; border: 1px dashed #9eacc5; border-radius: 8px; background: #fff; color: #3f4f68; font-size: 13px; line-height: 1.35; display: flex; flex-direction: column; justify-content: center; gap: 4px; }
-      .${FAVORITES_SECTION_CARDS_CLASS} .tm-favorite-placeholder .tm-favorite-placeholder-name { font-weight: 600; }
-      .${FAVORITES_SECTION_CARDS_CLASS} .tm-favorite-placeholder .tm-favorite-placeholder-hint { font-size: 11px; color: #5b6980; font-weight: 400; }
-      html.tm-presence-accent-all ${TILE_SELECTOR} > div[data-bind*="presenceState"],
-      html.tm-presence-accent-selected ${TILE_SELECTOR}.tm-name-match > div[data-bind*="presenceState"] { width: 10px !important; border-right: 1px solid rgba(255,255,255,0.65); box-shadow: inset -1px 0 0 rgba(0,0,0,0.2), inset 0 0 0 1px rgba(255,255,255,0.2); filter: saturate(1.3) contrast(1.12) brightness(1.05); border-radius: 0; transition: box-shadow .15s ease, filter .15s ease; }
-      html.tm-presence-accent-all ${TILE_SELECTOR}:hover > div[data-bind*="presenceState"],
-      html.tm-presence-accent-selected ${TILE_SELECTOR}.tm-name-match:hover > div[data-bind*="presenceState"] { box-shadow: inset -1px 0 0 rgba(0,0,0,0.24), inset 0 0 0 1px rgba(255,255,255,0.24); }
-      ${TILE_SELECTOR}.tm-name-match { outline: 3px solid var(--tm-tile-color, ${DEFAULT_HIGHLIGHT_COLOR}); border-radius: 8px; overflow: hidden; box-shadow: 0 0 0 2px color-mix(in srgb, var(--tm-tile-color, ${DEFAULT_HIGHLIGHT_COLOR}) 35%, transparent), 0 0 14px color-mix(in srgb, var(--tm-tile-color, ${DEFAULT_HIGHLIGHT_COLOR}) 35%, transparent); background: linear-gradient(0deg, color-mix(in srgb, var(--tm-tile-color, ${DEFAULT_HIGHLIGHT_COLOR}) 24%, white), color-mix(in srgb, var(--tm-tile-color, ${DEFAULT_HIGHLIGHT_COLOR}) 24%, white)); }
+      #${TOGGLE_ID} {
+        margin-left: 4px; margin-right: 4px; display: flex; align-items: center;
+        button { border: 1px solid #c5c5c5; border-radius: 4px; background: #fff; color: #222; font-size: 12px; line-height: 1.2; min-height: 28px; padding: 5px 9px; cursor: pointer; display: inline-flex; align-items: center; justify-content: center; }
+      }
+      #${PANEL_ID} {
+        position: fixed; top: 70px; right: 20px; width: 340px; background: #fff; border: 1px solid #bfc6d4; border-radius: 8px; box-shadow: 0 8px 26px rgba(0,0,0,.18); z-index: 2147483647; display: none; font-family: Arial, sans-serif;
+        &.open { display: block; }
+        .tm-head { padding: 10px 12px 6px; font-weight: 600; font-size: 13px; }
+        .tm-body { padding: 0 12px 12px; font-size: 12px; }
+        .tm-row { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 8px; }
+        .tm-dropdown { position: relative; margin-top: 8px; }
+        .tm-dropdown-toggle { width: 100%; text-align: left; border: 1px solid #9eacc5; border-radius: 6px; padding: 8px 34px 8px 10px; background: #fff; cursor: pointer; position: relative; font-weight: 400; }
+        .tm-dropdown-toggle::after { content: "▾"; position: absolute; right: 10px; top: 50%; transform: translateY(-50%); color: #44516a; font-size: 14px; pointer-events: none; }
+        .tm-dropdown-toggle:hover { background: #f7faff; border-color: #8396b8; }
+        .tm-picker-hint { margin-top: 4px; font-size: 11px; color: #5b6980; }
+        .tm-dropdown-menu { display: none; position: absolute; top: calc(100% + 4px); left: 0; right: 0; max-height: 260px; overflow: auto; border: 1px solid #c5c5c5; border-radius: 6px; background: #fff; z-index: 2; padding: 8px; }
+        &.tm-dropdown-open .tm-dropdown-toggle::after { content: "▴"; }
+        &.tm-dropdown-open .tm-dropdown-menu { display: block; }
+        .tm-search { width: 100%; border: 1px solid #d0d6e2; border-radius: 4px; padding: 5px 7px; margin-bottom: 6px; box-sizing: border-box; }
+        .tm-option { display: flex; align-items: center; gap: 7px; padding: 2px 0; }
+        .tm-selected-list { margin-top: 8px; border-top: 1px solid #eceff5; padding-top: 8px; max-height: 210px; overflow: auto; }
+        .tm-selected-item { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 6px; }
+        .tm-selected-item > span { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        input[type="color"] { width: 45px; height: 26px; border: 1px solid #c5c5c5; border-radius: 4px; padding: 0; cursor: pointer; }
+        .tm-actions { margin-top: 10px; display: flex; gap: 6px; flex-wrap: wrap; }
+        .tm-actions button { border: 1px solid #c5c5c5; border-radius: 4px; background: #f8f8f8; font-size: 12px; padding: 5px 8px; cursor: pointer; }
+        .tm-status { margin-top: 8px; color: #4f5b70; font-size: 11px; }
+        .tm-name-main { display: flex; align-items: center; gap: 6px; min-width: 0; }
+        .tm-favorite-toggle { border: 1px solid #c5c5c5; background: #fff; border-radius: 4px; color: #607089; width: 24px; height: 24px; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; font-size: 14px; line-height: 1; }
+        .tm-favorite-toggle.is-favorite { color: #c58600; border-color: #d4b45a; background: #fff8e6; }
+      }
+      .${FAVORITES_SECTION_CLASS} {
+        margin: 10px auto; width: calc(100% - 20px); box-sizing: border-box; padding: 8px; border: 1px solid #d9e2f1; border-radius: 8px; background: #f8fbff;
+        .tm-favorites-tiles-title { font-size: 12px; font-weight: 600; color: #3f4f68; margin-bottom: 8px; }
+      }
+      .${FAVORITES_SECTION_CARDS_CLASS} {
+        display: flex; flex-wrap: wrap; gap: 8px;
+        .tm-favorite-clone { flex: 0 1 220px; max-width: 260px; }
+        .tm-favorite-placeholder { flex: 0 1 220px; max-width: 260px; box-sizing: border-box; min-height: 72px; padding: 10px 12px; border: 1px dashed #9eacc5; border-radius: 8px; background: #fff; color: #3f4f68; font-size: 13px; line-height: 1.35; display: flex; flex-direction: column; justify-content: center; gap: 4px; }
+        .tm-favorite-placeholder-name { font-weight: 600; }
+        .tm-favorite-placeholder-hint { font-size: 11px; color: #5b6980; font-weight: 400; }
+      }
+      :is(html.tm-presence-accent-all ${TILE_SELECTOR}, html.tm-presence-accent-selected ${TILE_SELECTOR}.tm-name-match) {
+        > div[data-bind*="presenceState"] { width: 10px !important; border-right: 1px solid rgba(255,255,255,0.65); box-shadow: inset -1px 0 0 rgba(0,0,0,0.2), inset 0 0 0 1px rgba(255,255,255,0.2); filter: saturate(1.3) contrast(1.12) brightness(1.05); border-radius: 0; transition: box-shadow .15s ease, filter .15s ease; }
+        &:hover > div[data-bind*="presenceState"] { box-shadow: inset -1px 0 0 rgba(0,0,0,0.24), inset 0 0 0 1px rgba(255,255,255,0.24); }
+      }
+      ${TILE_SELECTOR}.tm-name-match {
+        --tm-c: var(--tm-tile-color, ${DEFAULT_HIGHLIGHT_COLOR});
+        outline: 3px solid var(--tm-c); border-radius: 8px; overflow: hidden;
+        box-shadow: 0 0 0 2px color-mix(in srgb, var(--tm-c) 35%, transparent), 0 0 14px color-mix(in srgb, var(--tm-c) 35%, transparent);
+        background: color-mix(in srgb, var(--tm-c) 24%, white);
+      }
     `;
     document.head.appendChild(style);
   }
 
   function getPanel() {
     return document.getElementById(PANEL_ID);
-  }
-
-  function getSelectedSet() {
-    return new Set(state.selectedNames);
   }
 
   function getColorForNameKey(nameKey) {
@@ -456,125 +358,72 @@
     state.perNameColors[nameKey] = free || AUTO_COLOR_PALETTE[usedByOthers.size % AUTO_COLOR_PALETTE.length];
   }
 
-  function collectLoadedFavoriteKeysInDom() {
-    const favorites = new Set(state.favoriteNames);
-    const loaded = new Set();
-    if (!favorites.size) {
-      return loaded;
+  function getMissingFavoriteKeys() {
+    if (!state.favoriteNames.length) {
+      return [];
     }
-    Array.from(document.querySelectorAll(TILE_SELECTOR))
-      .filter((tile) => !tile.classList.contains("tm-favorite-clone"))
-      .forEach((tile) => {
-        const info = getNameInfoFromTile(tile);
-        if (info && favorites.has(info.key)) {
-          loaded.add(info.key);
-        }
-      });
-    return loaded;
+    const loaded = new Set(getRealTiles().map((tile) => getNameInfoFromTile(tile)?.key));
+    return state.favoriteNames.filter((key) => state.selectedNames.includes(key) && !loaded.has(key));
   }
 
-  function collectMissingFavoriteKeysAgainstDom() {
-    const selected = getSelectedSet();
-    const loaded = collectLoadedFavoriteKeysInDom();
-    return state.favoriteNames.filter((key) => selected.has(key) && !loaded.has(key));
-  }
-
-  function fingerprintMissingFavoriteKeys(keys) {
+  function fingerprintKeys(keys) {
     return keys.slice().sort().join("\u0001");
   }
 
   function pickBestListScroller(sampleTile) {
-    if (!(sampleTile instanceof Element)) {
-      return null;
-    }
-    const candidates = [];
-    let cur = sampleTile.parentElement;
-    while (cur && cur instanceof HTMLElement) {
-      const style = window.getComputedStyle(cur);
-      const oy = style.overflowY;
-      const scrollableY = oy === "auto" || oy === "scroll" || oy === "overlay";
-      if (scrollableY && cur.scrollHeight > cur.clientHeight + 6) {
-        candidates.push(cur);
+    const scrollRange = (el) => el.scrollHeight - el.clientHeight;
+    let best = null;
+    for (let el = sampleTile.parentElement; el; el = el.parentElement) {
+      const scrollableY = ["auto", "scroll", "overlay"].includes(window.getComputedStyle(el).overflowY);
+      if (scrollableY && scrollRange(el) > 6 && (!best || scrollRange(el) > scrollRange(best))) {
+        best = el;
       }
-      cur = cur.parentElement;
     }
-    if (!candidates.length) {
-      const root = document.scrollingElement || document.documentElement;
-      if (root instanceof HTMLElement && root.scrollHeight > root.clientHeight + 6) {
-        return root;
-      }
-      return null;
+    if (best) {
+      return best;
     }
-    return candidates.reduce((best, el) => {
-      const range = el.scrollHeight - el.clientHeight;
-      const bestRange = best.scrollHeight - best.clientHeight;
-      return range > bestRange ? el : best;
-    });
+    const root = document.scrollingElement || document.documentElement;
+    return scrollRange(root) > 6 ? root : null;
   }
 
-  function finishFavoritePrefetch(scroller, savedTop, token, exhaustedMissingFp) {
-    if (token !== favoritePrefetchToken) {
-      return;
-    }
-    favoritePrefetchRunning = false;
-    if (scroller) {
-      scroller.scrollTop = savedTop;
-    }
-    if (exhaustedMissingFp) {
-      favoritePrefetchExhaustedFp = exhaustedMissingFp;
-    } else {
-      favoritePrefetchExhaustedFp = "";
-    }
-    refreshDiscoveryIncremental();
-  }
-
-  function runFavoriteTilePrefetchForMissing(options) {
+  // Scrolls the tile list step by step so the portal lazy-loads tiles of favorites that are not yet in the DOM.
+  function runFavoritePrefetch(force) {
     if (favoritePrefetchRunning) {
       return;
     }
-    const force = Boolean(options && options.force);
     if (force) {
       favoritePrefetchExhaustedFp = "";
     }
-    const missingStart = collectMissingFavoriteKeysAgainstDom();
+    const missingStart = getMissingFavoriteKeys();
     if (!missingStart.length) {
+      favoritePrefetchExhaustedFp = "";
       return;
     }
-    if (!force && fingerprintMissingFavoriteKeys(missingStart) === favoritePrefetchExhaustedFp) {
+    if (fingerprintKeys(missingStart) === favoritePrefetchExhaustedFp) {
       return;
     }
-    const sample = document.querySelector(`${TILE_SELECTOR}:not(.tm-favorite-clone)`);
-    if (!sample) {
-      return;
-    }
-    const scroller = pickBestListScroller(sample);
+    const sample = document.querySelector(REAL_TILE_SELECTOR);
+    const scroller = sample && pickBestListScroller(sample);
     if (!scroller) {
       return;
     }
 
-    const myToken = ++favoritePrefetchToken;
     favoritePrefetchRunning = true;
     const savedTop = scroller.scrollTop;
     let steps = 0;
     let stagnantMoves = 0;
 
-    const step = () => {
-      if (myToken !== favoritePrefetchToken) {
-        return;
-      }
+    const finish = (stillMissing) => {
+      favoritePrefetchRunning = false;
+      scroller.scrollTop = savedTop;
+      favoritePrefetchExhaustedFp = stillMissing.length ? fingerprintKeys(stillMissing) : "";
+      refreshDiscoveryIncremental();
+    };
 
-      const stillMissing = collectMissingFavoriteKeysAgainstDom();
-      if (!stillMissing.length) {
-        finishFavoritePrefetch(scroller, savedTop, myToken, "");
-        return;
-      }
-      if (steps >= FAVORITE_PREFETCH_MAX_STEPS) {
-        finishFavoritePrefetch(
-          scroller,
-          savedTop,
-          myToken,
-          fingerprintMissingFavoriteKeys(stillMissing)
-        );
+    const step = () => {
+      const stillMissing = getMissingFavoriteKeys();
+      if (!stillMissing.length || steps >= FAVORITE_PREFETCH_MAX_STEPS) {
+        finish(stillMissing);
         return;
       }
 
@@ -583,55 +432,26 @@
       const delta = Math.max(200, Math.floor(scroller.clientHeight * 0.82));
       scroller.scrollTop = Math.min(prevTop + delta, maxScroll);
       steps += 1;
+      stagnantMoves = scroller.scrollTop > prevTop + 0.5 ? 0 : stagnantMoves + 1;
 
-      const moved = scroller.scrollTop > prevTop + 0.5;
-      if (!moved) {
-        stagnantMoves += 1;
-      } else {
-        stagnantMoves = 0;
-      }
-
-      const atBottom = scroller.scrollTop >= maxScroll - 2;
-      if (atBottom || stagnantMoves >= 4) {
-        finishFavoritePrefetch(
-          scroller,
-          savedTop,
-          myToken,
-          fingerprintMissingFavoriteKeys(stillMissing)
-        );
+      if (scroller.scrollTop >= maxScroll - 2 || stagnantMoves >= 4) {
+        finish(stillMissing);
         return;
       }
-
       window.setTimeout(step, FAVORITE_PREFETCH_STEP_DELAY_MS);
     };
 
     window.setTimeout(step, 120);
   }
 
-  function scheduleFavoritePrefetchForMissing() {
-    window.clearTimeout(favoritePrefetchDebounce);
-    favoritePrefetchDebounce = window.setTimeout(() => {
-      const missing = collectMissingFavoriteKeysAgainstDom();
-      if (!missing.length) {
-        favoritePrefetchExhaustedFp = "";
-        return;
-      }
-      if (fingerprintMissingFavoriteKeys(missing) === favoritePrefetchExhaustedFp) {
-        return;
-      }
-      runFavoriteTilePrefetchForMissing({ force: false });
-    }, FAVORITE_PREFETCH_SCHEDULE_MS);
-  }
-
   function applyHighlighting() {
-    const selected = getSelectedSet();
+    const selected = new Set(state.selectedNames);
     const favorites = new Set(state.favoriteNames);
-    let hits = 0;
+    // host element -> (name key -> first tile with that name)
     const favoriteTilesByHost = new Map();
+    let hits = 0;
 
-    Array.from(document.querySelectorAll(TILE_SELECTOR))
-      .filter((tile) => !tile.classList.contains("tm-favorite-clone"))
-      .forEach((tile) => {
+    getRealTiles().forEach((tile) => {
       const info = getNameInfoFromTile(tile);
       const isMatch = Boolean(info && selected.has(info.key));
       tile.classList.toggle("tm-name-match", isMatch);
@@ -641,36 +461,24 @@
       } else {
         tile.style.removeProperty("--tm-tile-color");
       }
-      if (info) {
-        tileNameCache.set(tile, info.key);
-      }
 
-      if (info && favorites.has(info.key)) {
-        const host = tile.parentElement;
-        if (!host) {
-          return;
+      const host = tile.parentElement;
+      if (info && favorites.has(info.key) && host) {
+        const tilesByKey = favoriteTilesByHost.get(host) || new Map();
+        if (!tilesByKey.has(info.key)) {
+          tilesByKey.set(info.key, tile);
         }
-        const list = favoriteTilesByHost.get(host) || [];
-        list.push(tile);
-        favoriteTilesByHost.set(host, list);
+        favoriteTilesByHost.set(host, tilesByKey);
       }
     });
 
-    favoriteTilesByHost.forEach((tiles, host) => {
-      favoriteTilesByHost.set(host, dedupeTilesByNameKey(tiles));
-    });
-
-    const loadedFavoriteKeys = collectLoadedFavoriteKeysInDom();
-    const missingFavoriteKeys = state.favoriteNames.filter(
-      (key) => state.selectedNames.includes(key) && !loadedFavoriteKeys.has(key)
-    );
-
+    const missingFavoriteKeys = getMissingFavoriteKeys();
     renderFavoriteTilesSections(favoriteTilesByHost, missingFavoriteKeys);
 
-    if (!missingFavoriteKeys.length) {
-      favoritePrefetchExhaustedFp = "";
+    if (missingFavoriteKeys.length) {
+      scheduleFavoritePrefetch();
     } else {
-      scheduleFavoritePrefetchForMissing();
+      favoritePrefetchExhaustedFp = "";
     }
 
     const status = document.querySelector(`#${PANEL_ID} .tm-status`);
@@ -679,169 +487,135 @@
     }
   }
 
-  function getOrCreateFavoriteSection(host) {
-    let section = host.querySelector(`:scope > .${FAVORITES_SECTION_CLASS}`);
-    if (!section) {
-      section = document.createElement("div");
+  function renderFavoriteTilesSections(favoriteTilesByHost, missingFavoriteKeys) {
+    document.querySelectorAll(`.${FAVORITES_SECTION_CLASS}`).forEach((section) => section.remove());
+
+    const primaryHost =
+      favoriteTilesByHost.keys().next().value || document.querySelector(REAL_TILE_SELECTOR)?.parentElement;
+    if (missingFavoriteKeys.length && primaryHost && !favoriteTilesByHost.has(primaryHost)) {
+      favoriteTilesByHost.set(primaryHost, new Map());
+    }
+
+    favoriteTilesByHost.forEach((tilesByKey, host) => {
+      const section = document.createElement("div");
       section.className = FAVORITES_SECTION_CLASS;
       section.innerHTML = `<div class="tm-favorites-tiles-title">Favoriten</div><div class="${FAVORITES_SECTION_CARDS_CLASS}"></div>`;
-      host.insertBefore(section, host.firstChild);
-    }
-    return section;
-  }
-
-  function cleanupFavoriteSections() {
-    document.querySelectorAll(`.${FAVORITES_SECTION_CLASS}`).forEach((section) => section.remove());
-  }
-
-  function pickPrimaryFavoriteHost(favoriteTilesByHost) {
-    const first = favoriteTilesByHost.keys().next().value;
-    if (first) {
-      return first;
-    }
-    const sample = document.querySelector(`${TILE_SELECTOR}:not(.tm-favorite-clone)`);
-    return sample?.parentElement || null;
-  }
-
-  function renderFavoriteTilesSections(favoriteTilesByHost, missingFavoriteKeys) {
-    cleanupFavoriteSections();
-    const primaryHost = pickPrimaryFavoriteHost(favoriteTilesByHost);
-    const byHost = new Map();
-
-    favoriteTilesByHost.forEach((favoriteTiles, host) => {
-      const entry = byHost.get(host) || { tiles: [], placeholders: [] };
-      entry.tiles.push(...favoriteTiles);
-      byHost.set(host, entry);
-    });
-
-    if (missingFavoriteKeys.length && primaryHost) {
-      const entry = byHost.get(primaryHost) || { tiles: [], placeholders: [] };
-      missingFavoriteKeys.forEach((key) => {
-        if (!entry.placeholders.includes(key)) {
-          entry.placeholders.push(key);
-        }
-      });
-      byHost.set(primaryHost, entry);
-    }
-
-    byHost.forEach(({ tiles, placeholders }, host) => {
-      if (!tiles.length && !placeholders.length) {
-        return;
-      }
-      const section = getOrCreateFavoriteSection(host);
-      const cards = section.querySelector(`.${FAVORITES_SECTION_CARDS_CLASS}`);
-      cards.innerHTML = "";
-      tiles.forEach((tile) => {
+      const cards = section.lastElementChild;
+      tilesByKey.forEach((tile) => {
         const clone = tile.cloneNode(true);
         clone.classList.add("tm-favorite-clone");
         cards.appendChild(clone);
       });
-      placeholders.forEach((key) => {
-        const label = state.discoveredNames[key] || key;
-        const wrap = document.createElement("div");
-        wrap.className = "tm-favorite-placeholder";
-        wrap.dataset.nameKey = key;
-        wrap.innerHTML = `<span class="tm-favorite-placeholder-name"></span><span class="tm-favorite-placeholder-hint">Kachel erscheint nach dem Nachladen der Liste (z. B. nach unten scrollen).</span>`;
-        wrap.querySelector(".tm-favorite-placeholder-name").textContent = label;
-        cards.appendChild(wrap);
-      });
-      host.insertBefore(section, host.firstChild);
+      if (host === primaryHost) {
+        missingFavoriteKeys.forEach((key) => {
+          const placeholder = document.createElement("div");
+          placeholder.className = "tm-favorite-placeholder";
+          placeholder.dataset.nameKey = key;
+          placeholder.innerHTML = `<span class="tm-favorite-placeholder-name"></span><span class="tm-favorite-placeholder-hint">Kachel erscheint nach dem Nachladen der Liste (z. B. nach unten scrollen).</span>`;
+          placeholder.firstElementChild.textContent = state.discoveredNames[key] || key;
+          cards.appendChild(placeholder);
+        });
+      }
+      host.prepend(section);
     });
   }
 
   function applyPresenceAccentModeClass() {
-    const root = document.documentElement;
-    root.classList.remove("tm-presence-accent-all", "tm-presence-accent-selected");
-    if (state.presenceAccentMode === "selected") {
-      root.classList.add("tm-presence-accent-selected");
-    } else if (state.presenceAccentMode === "all") {
-      root.classList.add("tm-presence-accent-all");
-    }
-  }
-
-  function scheduleHighlighting() {
-    window.clearTimeout(highlightDebounce);
-    highlightDebounce = window.setTimeout(applyHighlighting, 120);
+    const classes = document.documentElement.classList;
+    classes.toggle("tm-presence-accent-all", state.presenceAccentMode === "all");
+    classes.toggle("tm-presence-accent-selected", state.presenceAccentMode === "selected");
   }
 
   function renderDiscoveredList() {
     const panel = getPanel();
-    if (!panel) {
-      return;
-    }
-    const list = panel.querySelector(".tm-options");
+    const list = panel?.querySelector(".tm-options");
     if (!list) {
       return;
     }
 
-    const filterValue = normalizeName(panel.querySelector(".tm-search")?.value || "");
-    const selected = getSelectedSet();
-    const names = Object.entries(state.discoveredNames).sort((a, b) => a[1].localeCompare(b[1], "de-DE"));
-    const items = names.filter(([, label]) => normalizeName(label).includes(filterValue));
-
-    list.innerHTML = items
+    const filterValue = normalizeName(panel.querySelector(".tm-search").value);
+    const selected = new Set(state.selectedNames);
+    list.innerHTML = Object.entries(state.discoveredNames)
+      .sort((a, b) => a[1].localeCompare(b[1], "de-DE"))
+      .filter(([, label]) => normalizeName(label).includes(filterValue))
       .map(([key, label]) => {
         const checked = selected.has(key) ? "checked" : "";
         return `<label class="tm-option"><input type="checkbox" data-name-key="${escapeHtml(key)}" ${checked}><span>${escapeHtml(label)}</span></label>`;
       })
       .join("");
 
-    const toggle = panel.querySelector(".tm-dropdown-toggle");
-    if (toggle) {
-      const suffix = state.selectedNames.length === 1 ? "" : "e";
-      toggle.textContent = `Namen auswählen (${state.selectedNames.length} Name${suffix} ausgewählt)`;
-    }
+    const count = state.selectedNames.length;
+    panel.querySelector(".tm-dropdown-toggle").textContent = `Namen auswählen (${count} Name${count === 1 ? "" : "n"} ausgewählt)`;
   }
 
   function renderSelectedList() {
-    const panel = getPanel();
-    if (!panel) {
-      return;
-    }
-    const list = panel.querySelector(".tm-selected-list");
+    const list = getPanel()?.querySelector(".tm-selected-list");
     if (!list) {
       return;
     }
     const rows = state.selectedNames
       .filter((key) => state.discoveredNames[key])
       .map((key) => {
-        const label = state.discoveredNames[key];
-        const color = getColorForNameKey(key);
         const isFavorite = state.favoriteNames.includes(key);
-        const favoriteClass = isFavorite ? "is-favorite" : "";
-        const favoriteIcon = isFavorite ? "★" : "☆";
         const favoriteTitle = isFavorite ? "Favorit entfernen" : "Als Favorit markieren";
         const safeKey = escapeHtml(key);
-        return `<div class="tm-selected-item"><div class="tm-name-main"><button type="button" class="tm-favorite-toggle ${favoriteClass}" data-favorite-key="${safeKey}" title="${favoriteTitle}" aria-label="${favoriteTitle}">${favoriteIcon}</button><span>${escapeHtml(label)}</span></div><input type="color" data-color-key="${safeKey}" value="${escapeHtml(color)}"></div>`;
+        return `<div class="tm-selected-item"><div class="tm-name-main"><button type="button" class="tm-favorite-toggle ${isFavorite ? "is-favorite" : ""}" data-favorite-key="${safeKey}" title="${favoriteTitle}" aria-label="${favoriteTitle}">${isFavorite ? "★" : "☆"}</button><span>${escapeHtml(state.discoveredNames[key])}</span></div><input type="color" data-color-key="${safeKey}" value="${escapeHtml(getColorForNameKey(key))}"></div>`;
       });
 
     list.innerHTML = rows.join("") || "<div>Keine Namen ausgewählt</div>";
   }
 
-  function toggleDropdown(forceOpen) {
-    const panel = getPanel();
-    if (!panel) {
-      return;
-    }
-    state.dropdownOpen = typeof forceOpen === "boolean" ? forceOpen : !state.dropdownOpen;
-    panel.classList.toggle("tm-dropdown-open", state.dropdownOpen);
+  function renderPanelLists() {
+    renderDiscoveredList();
+    renderSelectedList();
   }
 
-  function refreshDiscoveryIncremental() {
-    const tiles = getTilesByMode();
-    mergeDiscoveredFromTiles(tiles);
+  function toggleDropdown(forceOpen) {
+    state.dropdownOpen = typeof forceOpen === "boolean" ? forceOpen : !state.dropdownOpen;
+    getPanel()?.classList.toggle("tm-dropdown-open", state.dropdownOpen);
+  }
+
+  function togglePanel(forceState) {
+    state.panelVisible = typeof forceState === "boolean" ? forceState : !state.panelVisible;
+    getPanel()?.classList.toggle("open", state.panelVisible);
+    if (!state.panelVisible) {
+      toggleDropdown(false);
+    }
+  }
+
+  function toggleFavorite(key) {
+    if (!state.selectedNames.includes(key)) {
+      return;
+    }
+    state.favoriteNames = state.favoriteNames.includes(key)
+      ? state.favoriteNames.filter((favoriteKey) => favoriteKey !== key)
+      : [...state.favoriteNames, key];
+    persist("favoriteNames");
+    renderSelectedList();
     scheduleHighlighting();
   }
 
-  function scheduleDiscoveryUpdate(fullRebuild) {
-    window.clearTimeout(discoveryDebounce);
-    discoveryDebounce = window.setTimeout(() => {
-      if (fullRebuild) {
-        rebuildDiscoveredByMode();
-      } else {
-        refreshDiscoveryIncremental();
-      }
-    }, 130);
+  function setNameSelected(key, isSelected) {
+    state.selectedNames = state.selectedNames.filter((selectedKey) => selectedKey !== key);
+    if (isSelected) {
+      ensureDistinctColorForNameKey(key);
+      state.selectedNames.push(key);
+    }
+    state.favoriteNames = state.favoriteNames.filter((favoriteKey) => state.selectedNames.includes(favoriteKey));
+    persist("selectedNames", "favoriteNames", "perNameColors");
+    renderPanelLists();
+    scheduleHighlighting();
+  }
+
+  function clearSelection() {
+    if (!window.confirm("Möchtest du wirklich die komplette Auswahl leeren?")) {
+      return;
+    }
+    state.selectedNames = [];
+    state.favoriteNames = [];
+    persist("selectedNames", "favoriteNames");
+    renderPanelLists();
+    scheduleHighlighting();
   }
 
   function createPanel() {
@@ -855,7 +629,7 @@
       <div class="tm-body">
         <div class="tm-row">
           <label for="tm-default-color">Standardfarbe</label>
-          <input id="tm-default-color" type="color" value="${state.defaultColor}">
+          <input id="tm-default-color" type="color" value="${escapeHtml(state.defaultColor)}">
         </div>
         <div class="tm-row">
           <label for="tm-collection-mode">Namensquelle</label>
@@ -898,142 +672,83 @@
     modeSelect.value = state.collectionMode;
     presenceAccentModeSelect.value = state.presenceAccentMode;
 
+    const actions = {
+      refresh: () => scheduleDiscoveryUpdate(true),
+      "prefetch-favorites": () => {
+        scheduleFavoritePrefetch.cancel();
+        runFavoritePrefetch(true);
+      },
+      clear: clearSelection,
+      close: () => togglePanel(false),
+    };
+
     panel.addEventListener("click", (event) => {
       const button = event.target.closest("button");
       if (!button) {
         return;
       }
-      const action = button.getAttribute("data-action");
       if (button.classList.contains("tm-dropdown-toggle")) {
         toggleDropdown();
-        return;
-      }
-      if (action === "refresh") {
-        scheduleDiscoveryUpdate(true);
-      } else if (action === "prefetch-favorites") {
-        window.clearTimeout(favoritePrefetchDebounce);
-        runFavoriteTilePrefetchForMissing({ force: true });
-      } else if (action === "clear") {
-        const confirmed = window.confirm("Möchtest du wirklich die komplette Auswahl leeren?");
-        if (!confirmed) {
-          return;
-        }
-        state.selectedNames = [];
-        state.favoriteNames = [];
-        persistState();
-        renderDiscoveredList();
-        renderSelectedList();
-        scheduleHighlighting();
-      } else if (action === "close") {
-        togglePanel(false);
+      } else if (button.classList.contains("tm-favorite-toggle")) {
+        toggleFavorite(button.dataset.favoriteKey);
       } else {
-        const favoriteButton = button.closest(".tm-favorite-toggle");
-        if (!favoriteButton) {
-          return;
-        }
-        const key = favoriteButton.getAttribute("data-favorite-key");
-        if (!key || !state.selectedNames.includes(key)) {
-          return;
-        }
-        const favorites = new Set(state.favoriteNames);
-        if (favorites.has(key)) {
-          favorites.delete(key);
-        } else {
-          favorites.add(key);
-        }
-        state.favoriteNames = Array.from(favorites);
-        persistState();
-        renderSelectedList();
-        scheduleHighlighting();
+        actions[button.dataset.action]?.();
       }
     });
 
     function handlePerNameColorInput(event) {
-      const colorInput = event.target.closest('input[type="color"][data-color-key]');
+      const colorInput = event.target.closest("input[data-color-key]");
       if (!colorInput) {
         return;
       }
-      const key = colorInput.getAttribute("data-color-key");
-      state.perNameColors[key] = colorInput.value;
-      persistState();
+      state.perNameColors[colorInput.dataset.colorKey] = colorInput.value;
+      persist("perNameColors");
       scheduleHighlighting();
     }
 
     panel.addEventListener("change", (event) => {
-      const checkbox = event.target.closest('input[type="checkbox"][data-name-key]');
+      const checkbox = event.target.closest("input[data-name-key]");
       if (checkbox) {
-        const key = checkbox.getAttribute("data-name-key");
-        const selected = getSelectedSet();
-        if (checkbox.checked) {
-          selected.add(key);
-          ensureDistinctColorForNameKey(key);
-        } else {
-          selected.delete(key);
-        }
-        state.selectedNames = Array.from(selected);
-        state.favoriteNames = state.favoriteNames.filter((favoriteKey) => selected.has(favoriteKey));
-        persistState();
-        renderDiscoveredList();
-        renderSelectedList();
-        scheduleHighlighting();
-        return;
+        setNameSelected(checkbox.dataset.nameKey, checkbox.checked);
+      } else {
+        handlePerNameColorInput(event);
       }
-      handlePerNameColorInput(event);
     });
 
     panel.addEventListener("input", handlePerNameColorInput);
 
     defaultColorInput.addEventListener("input", () => {
       state.defaultColor = defaultColorInput.value || DEFAULT_HIGHLIGHT_COLOR;
-      persistState();
+      persist("defaultColor");
       renderSelectedList();
       scheduleHighlighting();
     });
 
     modeSelect.addEventListener("change", () => {
-      const next = modeSelect.value;
-      if (next !== "all_loaded" && next !== "visible_only") {
-        return;
-      }
-      state.collectionMode = next;
-      persistState();
+      state.collectionMode = modeSelect.value;
+      persist("collectionMode");
       scheduleDiscoveryUpdate(true);
     });
 
     presenceAccentModeSelect.addEventListener("change", () => {
-      const next = presenceAccentModeSelect.value;
-      if (next !== "all" && next !== "selected" && next !== "none") {
-        return;
-      }
-      state.presenceAccentMode = next;
-      persistState();
+      state.presenceAccentMode = presenceAccentModeSelect.value;
+      persist("presenceAccentMode");
       applyPresenceAccentModeClass();
       scheduleHighlighting();
     });
 
     panel.querySelector(".tm-search").addEventListener("input", renderDiscoveredList);
 
-    function isHeaderHighlightToggleClick(event) {
-      return Boolean(event.target.closest(`#${TOGGLE_ID}`));
-    }
-
     document.addEventListener("click", (event) => {
-      if (isHeaderHighlightToggleClick(event)) {
+      if (event.target.closest?.(`#${TOGGLE_ID}`)) {
         return;
       }
       // composedPath() is captured at dispatch time, so it still contains the panel
       // even if a panel click handler re-rendered (and detached) the clicked element.
-      const path = typeof event.composedPath === "function" ? event.composedPath() : [];
-      const inPanel = path.includes(panel) || panel.contains(event.target);
-      if (!inPanel) {
-        toggleDropdown(false);
-        if (state.panelVisible) {
-          togglePanel(false);
-        }
-        return;
-      }
-      const dropdown = panel.querySelector(".tm-dropdown");
-      if (state.dropdownOpen && dropdown && !path.includes(dropdown) && !dropdown.contains(event.target)) {
+      const path = event.composedPath();
+      if (!path.includes(panel)) {
+        togglePanel(false);
+      } else if (state.dropdownOpen && !path.includes(panel.querySelector(".tm-dropdown"))) {
         toggleDropdown(false);
       }
     });
@@ -1041,140 +756,82 @@
     document.addEventListener(
       "keydown",
       (event) => {
-        if (event.key !== "Escape") {
+        // The dropdown can only be open while the panel is visible.
+        if (event.key !== "Escape" || !state.panelVisible) {
           return;
         }
-        if (!state.panelVisible && !state.dropdownOpen) {
-          return;
-        }
+        event.preventDefault();
+        event.stopPropagation();
         if (state.dropdownOpen) {
-          event.preventDefault();
-          event.stopPropagation();
           toggleDropdown(false);
-          return;
-        }
-        if (state.panelVisible) {
-          event.preventDefault();
-          event.stopPropagation();
+        } else {
           togglePanel(false);
         }
       },
       true
     );
 
-    renderDiscoveredList();
-    renderSelectedList();
-  }
-
-  function togglePanel(forceState) {
-    const panel = getPanel();
-    if (!panel) {
-      return;
-    }
-    state.panelVisible = typeof forceState === "boolean" ? forceState : !state.panelVisible;
-    panel.classList.toggle("open", state.panelVisible);
-    if (!state.panelVisible) {
-      toggleDropdown(false);
-    }
+    renderPanelLists();
   }
 
   function injectToggleButtonIntoHeader() {
-    const headers = document.querySelectorAll(HEADER_SELECTOR);
-    if (!headers.length) {
-      return false;
-    }
-
-    for (const header of headers) {
-      const menu = header.querySelector(".sagehr-dataheader-menu");
-      if (!menu || header.querySelector(`#${TOGGLE_ID}`)) {
-        continue;
-      }
-      const wrapper = document.createElement("div");
-      wrapper.id = TOGGLE_ID;
-      wrapper.innerHTML = `<button type="button" title="Namen markieren">Highlight Namen</button>`;
-      wrapper.querySelector("button").addEventListener("click", () => togglePanel());
-      if (menu.parentElement === header) {
-        header.insertBefore(wrapper, menu);
-      } else {
-        header.appendChild(wrapper);
-      }
-      return true;
-    }
-    return false;
-  }
-
-  function onMutations(mutations) {
-    let hasRelevant = false;
-    const hasRealTile = (node) => {
-      if (!(node instanceof Element)) {
-        return false;
-      }
-      if (node.closest(`.${FAVORITES_SECTION_CLASS}`)) {
-        return false;
-      }
-      if (node.matches?.(`${TILE_SELECTOR}:not(.tm-favorite-clone)`)) {
-        return true;
-      }
-      return Boolean(node.querySelector?.(`${TILE_SELECTOR}:not(.tm-favorite-clone)`));
-    };
-
-    mutations.forEach((mutation) => {
-      if (mutation.type !== "childList") {
-        return;
-      }
-      mutation.addedNodes.forEach((node) => {
-        if (hasRealTile(node)) {
-          hasRelevant = true;
-        }
-      });
-      mutation.removedNodes.forEach((node) => {
-        if (hasRealTile(node)) {
-          hasRelevant = true;
-        }
-      });
-    });
-    if (!hasRelevant) {
+    if (document.getElementById(TOGGLE_ID)) {
       return;
     }
-    scheduleDiscoveryUpdate(state.collectionMode === "visible_only");
+    const menu = document.querySelector(`${HEADER_SELECTOR} .sagehr-dataheader-menu`);
+    if (!menu) {
+      return;
+    }
+    const header = menu.closest(HEADER_SELECTOR);
+    const wrapper = document.createElement("div");
+    wrapper.id = TOGGLE_ID;
+    wrapper.innerHTML = `<button type="button" title="Namen markieren">Highlight Namen</button>`;
+    wrapper.firstElementChild.addEventListener("click", () => togglePanel());
+    if (menu.parentElement === header) {
+      header.insertBefore(wrapper, menu);
+    } else {
+      header.appendChild(wrapper);
+    }
   }
 
-  function startObservers() {
-    tileObserver.observe(document.body, { childList: true, subtree: true });
+  function isRealTileNode(node) {
+    return (
+      node instanceof Element &&
+      !node.closest(`.${FAVORITES_SECTION_CLASS}`) &&
+      (node.matches(REAL_TILE_SELECTOR) || Boolean(node.querySelector(REAL_TILE_SELECTOR)))
+    );
+  }
 
-    uiObserver = new MutationObserver(() => {
-      if (!document.getElementById(TOGGLE_ID)) {
-        injectToggleButtonIntoHeader();
+  function startObserver() {
+    new MutationObserver((mutations) => {
+      injectToggleButtonIntoHeader();
+      const tilesChanged = mutations.some(
+        (mutation) => [...mutation.addedNodes].some(isRealTileNode) || [...mutation.removedNodes].some(isRealTileNode)
+      );
+      if (tilesChanged) {
+        scheduleDiscoveryUpdate(state.collectionMode === "visible_only");
       }
-    });
-    uiObserver.observe(document.body, { childList: true, subtree: true });
+    }).observe(document.body, { childList: true, subtree: true });
   }
 
   function bootstrap() {
-    loadState();
-    injectStyles();
-    applyPresenceAccentModeClass();
-    createPanel();
-    injectToggleButtonIntoHeader();
-    refreshDiscoveryIncremental();
-    applyHighlighting();
-    startObservers();
-  }
-
-  function scheduleBootstrap() {
-    const start = () => {
-      try {
-        bootstrap();
-      } catch (err) {
-        console.warn("[mPortal Name Highlighter] bootstrap failed", err);
-      }
-    };
-    if (document.readyState === "loading") {
-      document.addEventListener("DOMContentLoaded", () => window.setTimeout(start, 0), { once: true });
-    } else {
-      window.setTimeout(start, 0);
+    try {
+      loadState();
+      injectStyles();
+      applyPresenceAccentModeClass();
+      createPanel();
+      injectToggleButtonIntoHeader();
+      refreshDiscoveryIncremental();
+      applyHighlighting();
+      startObserver();
+    } catch (err) {
+      console.warn("[mPortal Name Highlighter] bootstrap failed", err);
     }
   }
 
-  scheduleBootstrap();
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", () => window.setTimeout(bootstrap, 0), { once: true });
+  } else {
+    window.setTimeout(bootstrap, 0);
+  }
 })();
